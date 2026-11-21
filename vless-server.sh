@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/Felix666-ship-It/vless-all-in-one2
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.4.15"
+readonly VERSION="3.4.16"
 readonly AUTHOR="Felix666-ship-It"
 readonly REPO_URL="https://github.com/Felix666-ship-It/vless-all-in-one2"
 readonly SCRIPT_REPO="Felix666-ship-It/vless-all-in-one2"
@@ -5148,30 +5148,48 @@ gen_sid() {
 #   PrivateKey:  <43/44 字符>
 #   Public key:  <43/44 字符>
 #   PublicKey:   <43/44 字符>
-#   Password:    <43/44 字符>                      ← 部分 26.x
-#   Password (PublicKey): <43/44 字符>             ← 26.11+，标签里带括号
+#   Password:    <43/44 字符>
+#   Password (PublicKey): <43/44 字符>          ← 26.11+
 #
-# 解析策略: 取行尾那段 base64url 值，按标签关键字归类。
-# 不用 sed 固定标签，是因为新版本会在标签后追加括号说明，固定匹配会全部失效。
+# 纯 bash 实现，不依赖 awk/sed 的外部行为差异。
+# 解析策略: 取冒号后的值，长度必须是 43/44；再按标签关键字归类。
 _x25519_field() {
-    local want="$1"
+    local want="${1:-}"
     [[ -z "$want" ]] && return 1
-    awk -v want="$want" '
-    {
-        line = $0
-        # 找最后一个「冒号 + 可选空白 + base64url 值」的位置
-        p = match(line, /:[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*$/)
-        if (p == 0) next
-        val = substr(line, p + 1)
-        gsub(/[[:space:]]/, "", val)
-        # 值长度必须是 43 或 44（x25519 base64url 无填充/有填充）
-        if (length(val) != 43 && length(val) != 44) next
-        label = tolower(substr(line, 1, p - 1))
-        is_priv = (label ~ /private/)
-        is_pub  = (label ~ /public/ || label ~ /password/)
-        if (want == "private" && is_priv) { print val; exit }
-        if (want == "public"  && is_pub && !is_priv) { print val; exit }
-    }'
+
+    local line val label
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        [[ -z "$line" ]] && continue
+        # 必须有冒号
+        [[ "$line" == *:* ]] || continue
+
+        # 值 = 最后一个冒号之后的部分，去掉所有空白
+        val="${line##*:}"
+        val="${val//[[:space:]]/}"
+        # x25519 的公私钥都是 43 或 44 字符的 base64url
+        [[ "$val" =~ ^[A-Za-z0-9_-]{43,44}$ ]] || continue
+
+        # 标签 = 最后一个冒号之前的部分，转小写
+        label="${line%:*}"
+        label="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')"
+
+        if [[ "$want" == "private" ]]; then
+            if [[ "$label" == *private* ]]; then
+                printf '%s\n' "$val"
+                return 0
+            fi
+        else
+            if [[ "$label" == *private* ]]; then
+                continue
+            fi
+            if [[ "$label" == *public* || "$label" == *password* ]]; then
+                printf '%s\n' "$val"
+                return 0
+            fi
+        fi
+    done
+    return 1
 }
 
 # 生成 Reality 密钥对 (x25519)
@@ -5188,8 +5206,19 @@ reality_keypair() {
     pub=$(printf '%s\n' "$out" | _x25519_field public)
 
     # 丢字段 = 硬失败，不再让空值流到 join 文件和客户端配置里
-    [[ -z "$priv" ]] && { _err "无法从 xray x25519 输出中解析私钥，原始输出:"; printf '%s\n' "$out" | sed 's/^/    /' >&2; return 1; }
-    [[ -z "$pub"  ]] && { _err "无法从 xray x25519 输出中解析公钥，原始输出:"; printf '%s\n' "$out" | sed 's/^/    /' >&2; return 1; }
+    if [[ -z "$priv" ]]; then
+        _err "无法从 xray x25519 输出中解析私钥，原始输出:"
+        printf '%s\n' "$out" | sed 's/^/    /' >&2
+        _err "当前脚本: v${VERSION}  路径: ${BASH_SOURCE[0]:-$0}"
+        return 1
+    fi
+    if [[ -z "$pub" ]]; then
+        _err "无法从 xray x25519 输出中解析公钥，原始输出:"
+        printf '%s\n' "$out" | sed 's/^/    /' >&2
+        _err "当前脚本: v${VERSION}  路径: ${BASH_SOURCE[0]:-$0}"
+        _err "如果版本号低于 3.4.16，请先执行: vless --update-script"
+        return 1
+    fi
 
     # 自洽校验: 用私钥反推公钥必须与本次输出一致
     local derived
@@ -25769,6 +25798,36 @@ case "${1:-}" in
         _self_update_force
         exit $?
         ;;
+    --version|-v)
+        echo "vless-server v${VERSION}"
+        echo "脚本路径: $(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "${BASH_SOURCE[0]:-$0}")"
+        exit 0
+        ;;
+    --debug-x25519)
+        # 诊断 xray x25519 输出解析：打印原始输出与各字段解析结果
+        if ! command -v xray &>/dev/null; then
+            echo "xray 未安装"
+            exit 1
+        fi
+        echo "脚本版本: v${VERSION}"
+        echo "xray 版本: $(xray version 2>/dev/null | head -1)"
+        echo "--- 原始输出 ---"
+        _raw=$(xray x25519 2>&1)
+        printf '%s\n' "$_raw"
+        echo "--- 解析结果 ---"
+        _p=$(_x25519_field private <<<"$_raw")
+        _u=$(_x25519_field public  <<<"$_raw")
+        echo "private: ${_p:-<解析失败>}"
+        echo "public : ${_u:-<解析失败>}"
+        if [[ -n "$_p" ]]; then
+            _d=$(xray x25519 -i "$_p" 2>/dev/null | _x25519_field public)
+            echo "私钥推导公钥: ${_d:-<解析失败>}"
+            if [[ -n "$_u" && -n "$_d" && "$_u" != "$_d" ]]; then
+                echo "警告: 输出公钥与推导公钥不一致"
+            fi
+        fi
+        exit 0
+        ;;
     --help|-h)
         echo "用法: $0 [选项]"
         echo ""
@@ -25784,6 +25843,8 @@ case "${1:-}" in
         echo "  --check-ipv6         打印 IPv4/IPv6 探测结果与 nginx IPv6 监听能力"
         echo "  --check-update       检查脚本版本（绕过缓存）"
         echo "  --update-script      无交互强制更新脚本到远端最新"
+        echo "  --version, -v        显示脚本版本与路径"
+        echo "  --debug-x25519       诊断 xray x25519 输出解析"
         echo "  --help, -h           显示帮助信息"
         echo ""
         echo "无参数时启动交互式菜单"
