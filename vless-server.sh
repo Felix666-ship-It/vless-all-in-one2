@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/Felix666-ship-It/vless-all-in-one2
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.4.12"
+readonly VERSION="3.4.13"
 readonly AUTHOR="Felix666-ship-It"
 readonly REPO_URL="https://github.com/Felix666-ship-It/vless-all-in-one2"
 readonly SCRIPT_REPO="Felix666-ship-It/vless-all-in-one2"
@@ -2269,6 +2269,10 @@ NGINX_EOF
     sed -i "s|CFG_PLACEHOLDER|${CFG}|g" "$nginx_conf"
     sed -i "s|PATH_PLACEHOLDER|${path}|g" "$nginx_conf"
     sed -i "s|PORT_PLACEHOLDER|${internal_port}|g" "$nginx_conf"
+    # 无 IPv6 的系统上删除 [::] 监听行，否则 nginx -t 会因 bind 失败整体报错
+    if ! _nginx_can_listen_v6; then
+        sed -i '/listen \[::\]:443/d' "$nginx_conf"
+    fi
     
     # 如果是 sites-available 模式，创建软链接
     if [[ "$nginx_conf" == *"sites-available"* ]]; then
@@ -4001,6 +4005,268 @@ check_installed() { [[ -d "$CFG" && ( -f "$CFG/config.json" || -f "$CFG/db.json"
 get_role()        { [[ -f "$CFG/role" ]] && cat "$CFG/role" || echo ""; }
 is_paused()       { [[ -f "$CFG/paused" ]]; }
 
+# 返回 IPv6 地址的链接形式：补上 [ ]，不合法返回空
+# 用法: _fmt_ipv6_link "2001:db8::1"  ->  [2001:db8::1]
+_fmt_ipv6_link() {
+    local ip="${1:-}"
+    [[ -z "$ip" ]] && return 0
+    ip="${ip#[}"; ip="${ip%]}"; ip="${ip%%/*}"
+    if [[ "$ip" == *:* ]]; then
+        printf '[%s]' "$ip"
+    fi
+}
+
+# 系统提示符约定的包名（用于回显与 apt/dnf 元数据前缀）
+_pm_package_name() {
+    case "$1" in
+        openssl)  [[ "$DISTRO" == "alpine" || "$DISTRO" == "centos" ]] && echo "openssl" || echo "openssl" ;;
+        ca-certificates|ca-cert) echo "ca-certificates" ;;
+        cron)     [[ "$DISTRO" == "alpine" ]] && echo "cronie" || echo "cron" ;;
+        qrencode) echo "qrencode" ;;
+        xz)       [[ "$DISTRO" == "alpine" ]] && echo "xz" || echo "xz-utils" ;;
+        *)        echo "$1" ;;
+    esac
+}
+
+# 别名 -> 真实包名，按发行版
+# 用法: _pm_map <distro> <alias>
+_pm_map() {
+    local d="$1" a="$2"
+    case "$d:$a" in
+        alpine:curl)              echo "curl" ;;
+        alpine:jq)                echo "jq" ;;
+        alpine:unzip)             echo "unzip" ;;
+        alpine:xz)                echo "xz" ;;
+        alpine:openssl)           echo "openssl" ;;
+        alpine:ca-certificates)   echo "ca-certificates" ;;
+        alpine:iproute2)          echo "iproute2" ;;
+        alpine:xxd)               echo "xxd" ;;
+        alpine:socat)             echo "socat" ;;
+        alpine:dnsutils)          echo "bind-tools" ;;
+        alpine:bind-utils)        echo "bind-tools" ;;
+        alpine:iptables)          echo "iptables" ;;
+        alpine:ip6tables)         echo "ip6tables" ;;
+        alpine:cron)              echo "cronie" ;;
+        alpine:qrencode)          echo "libqrencode-tools" ;;
+        alpine:coreutils)         echo "coreutils" ;;
+        alpine:gawk)              echo "gawk" ;;
+        alpine:awk)               echo "gawk" ;;
+        alpine:nc)                echo "netcat-openbsd" ;;
+        alpine:git)               echo "git" ;;
+        alpine:xz-utils)          echo "xz" ;;
+        alpine:gh)                echo "github-cli" ;;
+        alpine:dig)               echo "bind-tools" ;;
+        alpine:netstat)           echo "net-tools" ;;
+        alpine:ps)                echo "procps" ;;
+        alpine:gcompat)           echo "gcompat" ;;
+        alpine:libc6-compat)      echo "libc6-compat" ;;
+
+        centos:curl)              echo "curl" ;;
+        centos:jq)                echo "jq" ;;
+        centos:unzip)             echo "unzip" ;;
+        centos:xz)                echo "xz" ;;
+        centos:openssl)           echo "openssl" ;;
+        centos:ca-certificates)   echo "ca-certificates" ;;
+        centos:iproute2)          echo "iproute" ;;
+        centos:xxd)               echo "vim-common" ;;
+        centos:socat)             echo "socat" ;;
+        centos:dnsutils)          echo "bind-utils" ;;
+        centos:bind-utils)        echo "bind-utils" ;;
+        centos:iptables)          echo "iptables" ;;
+        centos:ip6tables)         echo "iptables" ;;
+        centos:cron)              echo "cronie" ;;
+        centos:qrencode)          echo "qrencode" ;;
+        centos:coreutils)         echo "coreutils" ;;
+        centos:gawk)              echo "gawk" ;;
+        centos:awk)               echo "gawk" ;;
+        centos:nc)                echo "nmap-ncat" ;;
+        centos:git)               echo "git" ;;
+        centos:xz-utils)          echo "xz" ;;
+        centos:gh)                echo "gh" ;;
+        centos:dig)               echo "bind-utils" ;;
+        centos:netstat)           echo "net-tools" ;;
+        centos:ps)                echo "procps-ng" ;;
+
+        debian:curl)              echo "curl" ;;
+        debian:jq)                echo "jq" ;;
+        debian:unzip)             echo "unzip" ;;
+        debian:xz)                echo "xz-utils" ;;
+        debian:openssl)           echo "openssl" ;;
+        debian:ca-certificates)   echo "ca-certificates" ;;
+        debian:iproute2)          echo "iproute2" ;;
+        debian:xxd)               echo "xxd" ;;
+        debian:socat)             echo "socat" ;;
+        debian:dnsutils)          echo "dnsutils" ;;
+        debian:bind-utils)        echo "dnsutils" ;;
+        debian:iptables)          echo "iptables" ;;
+        debian:ip6tables)         echo "iptables" ;;
+        debian:cron)              echo "cron" ;;
+        debian:qrencode)          echo "qrencode" ;;
+        debian:coreutils)         echo "coreutils" ;;
+        debian:gawk)              echo "gawk" ;;
+        debian:awk)               echo "gawk" ;;
+        debian:nc)                echo "netcat-openbsd" ;;
+        debian:git)               echo "git" ;;
+        debian:xz-utils)          echo "xz-utils" ;;
+        debian:gh)                echo "gh" ;;
+        debian:dig)               echo "dnsutils" ;;
+        debian:netstat)           echo "net-tools" ;;
+        debian:ps)                echo "procps" ;;
+        ubuntu:*)                 _pm_map debian "$a" ;;
+
+        *) echo "$a" ;;
+    esac
+}
+
+# 判断某个包是否已安装（不下载，只查本地 db）
+_pm_installed() {
+    local pkg="$1"
+    case "$DISTRO" in
+        alpine) apk info -e "$pkg" >/dev/null 2>&1 ;;
+        centos) rpm -q "$pkg" >/dev/null 2>&1 ;;
+        *)      dpkg -s "$pkg" >/dev/null 2>&1 ;;
+    esac
+}
+
+# 检查若干别名的命令是否全部可用，返回 0=全有，1=有缺
+_pm_have_cmds() {
+    local c
+    for c in "$@"; do
+        command -v "$c" >/dev/null 2>&1 || return 1
+    done
+    return 0
+}
+
+# 统一安装入口：一次装多个别名，失败自动重试一次，逐个补齐
+# 用法: _pm_install <alias...>
+# 返回: 0 全部成功；1 有包装不上（会把失败的包名打到 stderr）
+_pm_install() {
+    local -a wanted=()
+    local a p missing=()
+
+    for a in "$@"; do
+        [[ -z "$a" ]] && continue
+        wanted+=("$(_pm_map "$DISTRO" "$a")")
+    done
+    [[ ${#wanted[@]} -eq 0 ]] && return 0
+
+    _pm_refresh || _warn "软件源索引更新失败，继续尝试安装"
+
+    local attempt=1
+    while :; do
+        case "$DISTRO" in
+            alpine)
+                apk add --no-cache "${wanted[@]}" >/dev/null 2>&1
+                ;;
+            centos)
+                if command -v dnf >/dev/null 2>&1; then
+                    dnf install -y "${wanted[@]}" >/dev/null 2>&1
+                else
+                    yum install -y "${wanted[@]}" >/dev/null 2>&1
+                fi
+                ;;
+            *)
+                DEBIAN_FRONTEND=noninteractive apt-get install -y "${wanted[@]}" >/dev/null 2>&1
+                ;;
+        esac
+        local rc=$?
+
+        # 逐个确认实际装上没有
+        missing=()
+        for p in "${wanted[@]}"; do
+            _pm_installed "$p" || missing+=("$p")
+        done
+
+        if [[ ${#missing[@]} -eq 0 ]]; then
+            return 0
+        fi
+        if [[ $attempt -ge 2 ]]; then
+            printf '%s\n' "${missing[@]}" >&2
+            return 1
+        fi
+        # 第一轮失败：刷索引后再试一次，并逐个装（某个包装不上不会拖累其他包）
+        attempt=2
+        _warn "部分依赖未装上（${missing[*]}），刷新索引后逐个重试..."
+        _pm_refresh
+        for p in "${missing[@]}"; do
+            case "$DISTRO" in
+                alpine)  apk add --no-cache "$p" >/dev/null 2>&1 ;;
+                centos)
+                    if command -v dnf >/dev/null 2>&1; then dnf install -y "$p" >/dev/null 2>&1
+                    else yum install -y "$p" >/dev/null 2>&1; fi ;;
+                *)       DEBIAN_FRONTEND=noninteractive apt-get install -y "$p" >/dev/null 2>&1 ;;
+            esac
+        done
+    done
+}
+
+# 刷新软件源索引（带超时与镜像回退）
+_pm_refresh() {
+    case "$DISTRO" in
+        alpine)
+            timeout 120 apk update >/dev/null 2>&1 && return 0
+            # 回退到阿里云镜像
+            local repo="/etc/apk/repositories"
+            if [[ -w "$repo" ]]; then
+                sed -i 's|^https\?://[^/]*/alpine|https://mirrors.aliyun.com/alpine|' "$repo" 2>/dev/null
+                timeout 120 apk update >/dev/null 2>&1 && { _ok "已切换到阿里云 Alpine 镜像"; return 0; }
+            fi
+            return 1
+            ;;
+        centos)
+            timeout 180 yum makecache -y >/dev/null 2>&1 && return 0
+            if [[ -w /etc/yum.repos.d/CentOS-Base.repo ]]; then
+                sed -i 's|^mirrorlist=|#mirrorlist=|; s|^#baseurl=http://mirror.centos.org|baseurl=https://mirrors.aliyun.com|' /etc/yum.repos.d/CentOS-Base.repo 2>/dev/null
+                timeout 180 yum makecache -y >/dev/null 2>&1 && { _ok "已切换到阿里云 CentOS 镜像"; return 0; }
+            fi
+            return 1
+            ;;
+        *)
+            local f
+            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+                [[ -f "$f" ]] || continue
+                if timeout 180 apt-get update >/dev/null 2>&1; then
+                    return 0
+                fi
+                # 回退：把 deb.debian.org / archive.ubuntu.com 换成阿里云镜像
+                if [[ -w "$f" ]]; then
+                    cp -f "$f" "$f.vless-bak.$(date +%s)" 2>/dev/null
+                    sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g; s|archive.ubuntu.com|mirrors.aliyun.com|g; s|security.ubuntu.com|mirrors.aliyun.com|g; s|ports.ubuntu.com|mirrors.aliyun.com|g' "$f" 2>/dev/null
+                fi
+            done
+            timeout 180 apt-get update >/dev/null 2>&1 && { _ok "已切换到阿里云 APT 镜像（原配置已备份为 *.vless-bak.*）"; return 0; }
+            return 1
+            ;;
+    esac
+}
+
+# 定义 "检查用的命令 -> 安装用别名" 映射
+# 用法: _pm_resolve_alias <command-name>
+_pm_cmd_to_alias() {
+    case "$1" in
+        curl|wget|jq|openssl|unzip|xz|socat|git|nc|dig|nslookup|host|iptables|ip6tables|xxd|qrencode|netstat|ps|ss|ip|awk|gawk|crontab|gh) echo "$1" ;;
+        *) echo "" ;;
+    esac
+}
+
+# 判断当前系统是否有可用 IPv6（供 nginx 配置决定是否追加 [::] 监听行）
+# 无 IPv6 时 nginx 会因 bind [::] 失败而整份配置加载失败，必须提前判断
+_nginx_can_listen_v6() {
+    [[ -e /proc/net/if_inet6 ]] || return 1
+    # 至少有一个非 loopback 的 IPv6 地址
+    local a
+    a=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/ {print $2}' | head -1)
+    [[ -n "$a" ]]
+}
+
+# 生成 nginx 的 IPv6 listen 行；无 IPv6 时输出空
+# 用法: _nginx_listen_v6 "<port>" "[ssl http2]"  ->  "    listen [::]:PORT ...;" 或 ""
+_nginx_listen_v6() {
+    local port="$1" extra="${2:-}"
+    _nginx_can_listen_v6 || return 0
+    printf '    listen [::]:%s%s;\n' "$port" "${extra:+ $extra}"
+}
+
 # 配置 DNS64 (纯 IPv6 环境)
 configure_dns64() {
     # 检测 IPv4 网络是否可用
@@ -4039,78 +4305,160 @@ check_dependencies() {
     # 先配置 DNS64 (如果是纯 IPv6 环境)
     configure_dns64
     
-    local missing_deps=()
-    local need_install=false
-    
-    # 必需的基础命令
-    local required_cmds="curl jq openssl qrencode"
-    
-    for cmd in $required_cmds; do
+    # 必需命令 -> 安装别名
+    # 注意：命令名与包名不同（例如 Alpine 的 dig 在 bind-tools，qrencode 在 libqrencode-tools）
+    local -A required=( [curl]="curl" [jq]="jq" [openssl]="openssl" [qrencode]="qrencode" [xxd]="xxd" )
+    local -a need_aliases=()
+    local -a missing_cmds=()
+    local cmd alias pkg
+
+    for cmd in "${!required[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
-            missing_deps+=("$cmd")
-            need_install=true
+            missing_cmds+=("$cmd")
+            need_aliases+=("${required[$cmd]}")
         fi
     done
 
-    # 检查 crontab (流量统计和过期检查需要)
+    # xxd 缺失不是致命错误（仅用于短 ID 生成，脚本有 od 回退），但装了更稳
+    # crontab 用于流量统计与过期检查
     if ! command -v crontab &>/dev/null; then
-        missing_deps+=("cron")
-        need_install=true
+        missing_cmds+=("crontab")
+        need_aliases+=("cron")
     fi
 
     if ! _has_ca_bundle; then
-        missing_deps+=("ca-certificates")
-        need_install=true
+        missing_cmds+=("ca-certificates")
+        need_aliases+=("ca-certificates")
     fi
-    
-    if [[ "$need_install" == "true" ]]; then
-        _info "安装缺失的依赖: ${missing_deps[*]}..."
-        
-        case "$DISTRO" in
-            alpine)
-                apk update >/dev/null 2>&1
-                apk add --no-cache curl jq openssl coreutils ca-certificates gawk libqrencode-tools cronie >/dev/null 2>&1
-                # 启动 crond 服务
-                rc-service crond start >/dev/null 2>&1
-                rc-update add crond default >/dev/null 2>&1
+
+    if [[ ${#need_aliases[@]} -eq 0 ]]; then
+        _ok "基础依赖齐全"
+        return 0
+    fi
+
+    _info "缺少依赖: ${missing_cmds[*]}，开始安装..."
+    _info "安装包: $(_pm_map_list "${need_aliases[@]}")"
+
+    if _pm_install "${need_aliases[@]}"; then
+        _ok "包管理器安装完成"
+    else
+        _warn "包管理器未能装全，尝试用官方安装脚本兜底..."
+        _pm_fallback_hooks "${missing_cmds[@]}"
+    fi
+
+    # === 最终校验：以"命令可用"为准，不以"包已存在"为准 ===
+    local -a still_missing=()
+    for cmd in curl jq openssl qrencode; do
+        command -v "$cmd" &>/dev/null || still_missing+=("$cmd")
+    done
+    command -v crontab &>/dev/null || still_missing+=("crontab")
+    _has_ca_bundle || still_missing+=("ca-certificates")
+
+    if [[ ${#still_missing[@]} -ne 0 ]]; then
+        _err "依赖安装失败，仍缺少: ${still_missing[*]}"
+        _err "手动安装命令:"
+        _pm_manual_hint "${still_missing[@]}"
+        return 1
+    fi
+
+    # cron 服务（装包不一定代表服务在跑）
+    _pm_ensure_cron_service
+
+    _ok "依赖安装完成"
+    return 0
+}
+
+# 把别名列表转成可视包名串
+_pm_map_list() {
+    local a out=""
+    for a in "$@"; do
+        out+="$(_pm_map "$DISTRO" "$a") "
+    done
+    echo "${out% }"
+}
+
+# 输出当前发行版对应的手动安装命令
+_pm_manual_hint() {
+    local -a pkgs=()
+    local c a
+    for c in "$@"; do
+        a="$(_pm_cmd_to_alias "$c")"
+        [[ -z "$a" ]] && continue
+        pkgs+=("$(_pm_map "$DISTRO" "$a")")
+    done
+    case "$DISTRO" in
+        alpine) echo "  apk add --no-cache ${pkgs[*]}" ;;
+        centos) echo "  yum install -y ${pkgs[*]}" ;;
+        *)      echo "  apt-get update && apt-get install -y ${pkgs[*]}" ;;
+    esac
+}
+
+# 包管理器之外的兜底方案：针对"在源里装不到"的命令用官方产物补齐
+_pm_fallback_hooks() {
+    local want
+    for want in "$@"; do
+        case "$want" in
+            curl)
+                command -v curl &>/dev/null && continue
+                if command -v wget &>/dev/null && command -v busybox &>/dev/null; then
+                    busybox wget -q -O /usr/local/bin/curl "https://curl.se/download/curl-latest.tar.gz" 2>/dev/null && \
+                        _warn "curl 无法从源安装，请手工安装后重试"
+                fi
                 ;;
-            centos)
-                yum install -y curl jq openssl ca-certificates qrencode cronie >/dev/null 2>&1
-                # 启动 crond 服务
-                systemctl enable crond >/dev/null 2>&1
-                systemctl start crond >/dev/null 2>&1
+            jq)
+                command -v jq &>/dev/null && continue
+                local arch=""
+                case "$(uname -m)" in
+                    x86_64|amd64) arch="amd64" ;;
+                    aarch64|arm64) arch="arm64" ;;
+                    armv7l|armv7) arch="armhf" ;;
+                    *) arch="" ;;
+                esac
+                if [[ -n "$arch" ]] && command -v curl &>/dev/null; then
+                    if curl -fsSL -o /usr/local/bin/jq "https://github.com/jqlang/jq/releases/latest/download/jq-linux-${arch}" 2>/dev/null && chmod +x /usr/local/bin/jq; then
+                        [[ "$(/usr/local/bin/jq -r '.test' <<<'{"test":"ok"}' 2>/dev/null)" == "ok" ]] && { _ok "jq 已从官方 Release 安装到 /usr/local/bin/jq"; continue; }
+                        rm -f /usr/local/bin/jq
+                    fi
+                fi
                 ;;
-            debian|ubuntu)
-                apt-get update >/dev/null 2>&1
-                DEBIAN_FRONTEND=noninteractive apt-get install -y curl jq openssl ca-certificates qrencode cron >/dev/null 2>&1
-                # Debian/Ubuntu 的 cron 通常自动启动,但确保服务运行
-                if command -v systemctl >/dev/null 2>&1; then
-                    systemctl enable cron >/dev/null 2>&1
-                    systemctl start cron >/dev/null 2>&1
+            qrencode)
+                command -v qrencode &>/dev/null && continue
+                # 二维码只影响显示，缺了不阻断安装；提示一次即可
+                _warn "qrencode 未安装，二维码将不显示（其他功能不受影响）"
+                ;;
+            openssl)
+                command -v openssl &>/dev/null && continue
+                _warn "openssl 未安装，证书相关功能不可用"
+                ;;
+            xxd)
+                command -v xxd &>/dev/null && continue
+                if command -v od &>/dev/null; then
+                    _info "xxd 未安装，使用 od 作为 ShortID 生成的回退方案"
                 fi
                 ;;
         esac
-        
-        # 再次检查
-        for cmd in $required_cmds; do
-            if ! command -v "$cmd" &>/dev/null; then
-                _err "依赖安装失败: $cmd"
-                _warn "请手动安装: $cmd"
-                return 1
-            fi
-        done
-        if ! command -v crontab &>/dev/null; then
-            _err "依赖安装失败: crontab"
-            _warn "请手动安装 cron 服务"
-            return 1
+    done
+}
+
+# 确保 cron 服务真正在运行（装包不等于服务已启用）
+_pm_ensure_cron_service() {
+    if [[ "$DISTRO" == "alpine" ]]; then
+        if command -v rc-update &>/dev/null; then
+            rc-update show 2>/dev/null | grep -qw crond || rc-update add crond default >/dev/null 2>&1
+            rc-service crond status >/dev/null 2>&1 || rc-service crond start >/dev/null 2>&1
         fi
-        if ! _has_ca_bundle; then
-            _err "依赖安装失败: ca-certificates"
-            _warn "请手动安装: ca-certificates"
-            return 1
-        fi
-        _ok "依赖安装完成"
+        return 0
     fi
+    local unit=""
+    if systemctl list-unit-files 2>/dev/null | grep -q '^cron.service'; then
+        unit="cron"
+    elif systemctl list-unit-files 2>/dev/null | grep -q '^crond.service'; then
+        unit="crond"
+    fi
+    [[ -z "$unit" ]] && return 0
+    systemctl is-enabled "$unit" >/dev/null 2>&1 || systemctl enable "$unit" >/dev/null 2>&1
+    systemctl is-active "$unit" >/dev/null 2>&1 || systemctl start "$unit" >/dev/null 2>&1
+    # 容器 / WSL 等无 systemd 环境：静默跳过
     return 0
 }
 
@@ -4258,11 +4606,41 @@ get_ipv4() {
 }
 get_ipv6() {
     [[ -n "$_CACHED_IPV6" ]] && { echo "$_CACHED_IPV6"; return; }
-    local result=$(curl -6 -sf --connect-timeout 5 ip.sb 2>/dev/null || curl -6 -sf --connect-timeout 5 ifconfig.me 2>/dev/null)
+    local result=""
+    # 链路级探测顺序：先看系统全局地址（最快且不依赖外网），再走 curl -6，最后用接口名绑源地址
+    result=$(_get_global_ipv6)
+    if [[ -z "$result" ]]; then
+        result=$(curl -6 -sf --connect-timeout 5 ip.sb 2>/dev/null || curl -6 -sf --connect-timeout 5 ifconfig.me 2>/dev/null)
+    fi
+    if [[ -z "$result" ]]; then
+        local iface addr
+        for iface in $(ls /sys/class/net 2>/dev/null | grep -v '^lo$'); do
+            addr=$(_get_global_ipv6 "$iface")
+            [[ -n "$addr" ]] && { result="$addr"; break; }
+        done
+    fi
+    # 规范化：去掉可能出现的方括号或 /64 后缀
+    result="${result#[}"; result="${result%]}"
+    result="${result%%/*}"
     [[ -n "$result" ]] && _CACHED_IPV6="$result"
     echo "$result"
 }
 
+# 取单个网卡的全局 IPv6（可选接口名参数；无参数时取第一个可用的）
+# 排除 回环/链路本地/ULA(fc00::/7)，只保留公网 routable 地址
+_get_global_ipv6() {
+    local iface="$1" addr=""
+    if [[ -n "$iface" ]]; then
+        addr=$(ip -6 addr show dev "$iface" scope global 2>/dev/null | awk '/inet6/ {print $2}' | cut -d'/' -f1 | head -1)
+    else
+        addr=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/ {print $2}' | cut -d'/' -f1 | head -1)
+    fi
+    [[ -z "$addr" ]] && return 1
+    case "$addr" in
+        ::1|fe80:*|fc*|fd*) return 1 ;;
+    esac
+    echo "$addr"
+}
 # 获取 IP 地理位置代码 (如 HK, JP, US, SG)
 get_ip_country() {
     local ip="${1:-}"
@@ -5051,7 +5429,12 @@ EOF
         if [[ "$protocol" == "vless" || "$protocol" == "vless-xhttp" ]]; then
             # Reality协议：Nginx独立运行，提供HTTP订阅服务
             nginx_port="${custom_nginx_port:-8080}"
-            nginx_listen="[::]:$nginx_port"
+            # 有 IPv6 时用 [::] 双栈监听，没有则退回 0.0.0.0
+            if _nginx_can_listen_v6; then
+                nginx_listen="[::]:$nginx_port"
+            else
+                nginx_listen="0.0.0.0:$nginx_port"
+            fi
             nginx_comment="独立提供订阅服务 (HTTP)，不与Reality冲突"
             
             # 检测是否使用真实证书 (真实域名模式)
@@ -5093,7 +5476,7 @@ server {
 # HTTPS 订阅服务 (独立端口)
 server {
     listen $nginx_port ssl http2;
-    listen [::]:$nginx_port ssl http2;
+$(_nginx_listen_v6 "$nginx_port" "ssl http2")
     server_name $domain;
     
     ssl_certificate $CFG/certs/server.crt;
@@ -5170,7 +5553,7 @@ server {
 # 订阅服务 (外部直接访问) - 伪装网页 + 订阅
 server {
     listen $nginx_port ssl http2;
-    listen [::]:$nginx_port ssl http2;
+$(_nginx_listen_v6 "$nginx_port" "ssl http2")
     server_name $domain;
     
     ssl_certificate $CFG/certs/server.crt;
@@ -5416,6 +5799,121 @@ get_ip_suffix() {
     fi
 }
 
+# 生成 IPv6 版分享链接（仅当拿到全局 IPv6 时返回，否则输出空）
+# 第二个参数必须是纯 IPv6 地址，混入 IPv4 时直接返回空
+# 用法: _gen_link_v6 <protocol> <ipv6> <visible_port> <country> <args...>
+_gen_link_v6() {
+    local proto="$1" raw_ip="$2" visible_port="$3" country="${4:-}"
+    shift 4
+
+    [[ "$raw_ip" != *:* ]] && return 0
+    local ip6
+    ip6=$(_fmt_ipv6_link "$raw_ip")
+    [[ -z "$ip6" ]] && return 0
+
+    case "$proto" in
+        vless)        gen_vless_link        "$ip6" "$visible_port" "$@" ;;
+        vless-xhttp)  gen_vless_xhttp_link  "$ip6" "$visible_port" "$@" ;;
+        vless-vision) gen_vless_vision_link "$ip6" "$visible_port" "$@" ;;
+        vless-ws)     gen_vless_ws_link     "$ip6" "$visible_port" "$@" ;;
+        vmess-ws)     gen_vmess_ws_link     "$ip6" "$visible_port" "$@" ;;
+        ss2022)       gen_ss2022_link       "$ip6" "$visible_port" "$@" ;;
+        ss-legacy)    gen_ss_legacy_link    "$ip6" "$visible_port" "$@" ;;
+        hy2)          gen_hy2_link          "$ip6" "$visible_port" "$@" ;;
+        trojan)       gen_trojan_link       "$ip6" "$visible_port" "$@" ;;
+        trojan-ws)    gen_trojan_ws_link    "$ip6" "$visible_port" "$@" ;;
+        snell)        gen_snell_link        "$ip6" "$visible_port" "$@" ;;
+        snell-v5)     gen_snell_v5_link     "$ip6" "$visible_port" "$@" ;;
+        tuic)         gen_tuic_link         "$ip6" "$visible_port" "$@" ;;
+        anytls)       gen_anytls_link       "$ip6" "$visible_port" "$@" ;;
+        socks)        gen_socks_link        "$ip6" "$visible_port" "$@" ;;
+        *)            return 0 ;;
+    esac
+}
+
+# 单个协议实例的分享链接（IPv4 / IPv6 两版）
+# 参数与原 show_single_protocol_info 的 case 完全对齐，额外接收 ipv6
+# 输出格式:
+#   IPV4=<link>   或空
+#   IPV6=<link>   或空
+_gen_share_link_pair() {
+    local protocol="$1" ipv4="$2" ipv6="$3" visible_port="$4" cc="$5"
+    local uuid="$6" public_key="$7" short_id="$8" sni="$9"
+    shift 9
+    # 剩余: path password username method psk version domain host
+    local path="${1:-}" password="${2:-}" username="${3:-}" method="${4:-}"
+    local psk="${5:-}" version="${6:-}" domain="${7:-}" host="${8:-}"
+
+    local link4="" link6=""
+    case "$protocol" in
+        vless)
+            [[ -n "$ipv4" ]] && link4=$(gen_vless_link "$ipv4" "$visible_port" "$uuid" "$public_key" "$short_id" "$sni" "$cc")
+            link6=$(_gen_link_v6 vless "$ipv6" "$visible_port" "$cc" "$uuid" "$public_key" "$short_id" "$sni")
+            ;;
+        vless-xhttp)
+            [[ -n "$ipv4" ]] && link4=$(gen_vless_xhttp_link "$ipv4" "$visible_port" "$uuid" "$public_key" "$short_id" "$sni" "$path" "$cc")
+            link6=$(_gen_link_v6 vless-xhttp "$ipv6" "$visible_port" "$cc" "$uuid" "$public_key" "$short_id" "$sni" "$path")
+            ;;
+        vless-vision)
+            [[ -n "$ipv4" ]] && link4=$(gen_vless_vision_link "$ipv4" "$visible_port" "$uuid" "$sni" "$cc")
+            link6=$(_gen_link_v6 vless-vision "$ipv6" "$visible_port" "$cc" "$uuid" "$sni")
+            ;;
+        vless-ws)
+            [[ -n "$ipv4" ]] && link4=$(gen_vless_ws_link "$ipv4" "$visible_port" "$uuid" "$sni" "$path" "$cc")
+            link6=$(_gen_link_v6 vless-ws "$ipv6" "$visible_port" "$cc" "$uuid" "$sni" "$path")
+            ;;
+        vmess-ws)
+            [[ -n "$ipv4" ]] && link4=$(gen_vmess_ws_link "$ipv4" "$visible_port" "$uuid" "$sni" "$path" "$cc")
+            link6=$(_gen_link_v6 vmess-ws "$ipv6" "$visible_port" "$cc" "$uuid" "$sni" "$path")
+            ;;
+        ss2022)
+            [[ -n "$ipv4" ]] && link4=$(gen_ss2022_link "$ipv4" "$visible_port" "$method" "$password" "$cc")
+            link6=$(_gen_link_v6 ss2022 "$ipv6" "$visible_port" "$cc" "$method" "$password")
+            ;;
+        ss-legacy)
+            [[ -n "$ipv4" ]] && link4=$(gen_ss_legacy_link "$ipv4" "$visible_port" "$method" "$password" "$cc")
+            link6=$(_gen_link_v6 ss-legacy "$ipv6" "$visible_port" "$cc" "$method" "$password")
+            ;;
+        hy2)
+            [[ -n "$ipv4" ]] && link4=$(gen_hy2_link "$ipv4" "$visible_port" "$password" "$sni" "$cc")
+            link6=$(_gen_link_v6 hy2 "$ipv6" "$visible_port" "$cc" "$password" "$sni")
+            ;;
+        trojan)
+            [[ -n "$ipv4" ]] && link4=$(gen_trojan_link "$ipv4" "$visible_port" "$password" "$sni" "$cc")
+            link6=$(_gen_link_v6 trojan "$ipv6" "$visible_port" "$cc" "$password" "$sni")
+            ;;
+        trojan-ws)
+            [[ -n "$ipv4" ]] && link4=$(gen_trojan_ws_link "$ipv4" "$visible_port" "$password" "$sni" "$path" "$cc")
+            link6=$(_gen_link_v6 trojan-ws "$ipv6" "$visible_port" "$cc" "$password" "$sni" "$path")
+            ;;
+        snell)
+            [[ -n "$ipv4" ]] && link4=$(gen_snell_link "$ipv4" "$visible_port" "$psk" "$version" "$cc")
+            link6=$(_gen_link_v6 snell "$ipv6" "$visible_port" "$cc" "$psk" "$version")
+            ;;
+        snell-v5)
+            [[ -n "$ipv4" ]] && link4=$(gen_snell_v5_link "$ipv4" "$visible_port" "$psk" "$version" "$cc")
+            link6=$(_gen_link_v6 snell-v5 "$ipv6" "$visible_port" "$cc" "$psk" "$version")
+            ;;
+        tuic)
+            [[ -n "$ipv4" ]] && link4=$(gen_tuic_link "$ipv4" "$visible_port" "$uuid" "$password" "$sni" "$cc")
+            link6=$(_gen_link_v6 tuic "$ipv6" "$visible_port" "$cc" "$uuid" "$password" "$sni")
+            ;;
+        anytls)
+            [[ -n "$ipv4" ]] && link4=$(gen_anytls_link "$ipv4" "$visible_port" "$password" "$sni" "$cc")
+            link6=$(_gen_link_v6 anytls "$ipv6" "$visible_port" "$cc" "$password" "$sni")
+            ;;
+        naive)
+            [[ -n "$domain" ]] && link4=$(gen_naive_link "$domain" "$visible_port" "$username" "$password" "$cc")
+            ;;
+        socks)
+            [[ -n "$ipv4" ]] && link4=$(gen_socks_link "$ipv4" "$visible_port" "$username" "$password" "$cc")
+            link6=$(_gen_link_v6 socks "$ipv6" "$visible_port" "$cc" "$username" "$password")
+            ;;
+    esac
+
+    printf 'IPV4=%s\nIPV6=%s\n' "$link4" "$link6"
+}
+
 #═══════════════════════════════════════════════════════════════════════════════
 # 分享链接生成
 #═══════════════════════════════════════════════════════════════════════════════
@@ -5656,74 +6154,96 @@ test_latency() {
 #═══════════════════════════════════════════════════════════════════════════════
 
 # 安装系统依赖
+# 设计要点：
+#   1. 每个包单独尝试一次，单个包装不上不会让整批失败
+#   2. 索引刷新失败时自动切到阿里云镜像重试
+#   3. 以"命令是否可用"为最终判据，而不是"包是否在 dpkg/rpm 数据库里"
+#   4. 关键包缺失时明确报错，非关键包（xxd/qrencode 等）降级为警告
 install_deps() {
     _info "检查系统依赖..."
+
+    local -a want_aliases=()
+    local -a want_cmds=()
+
+    # ---- 关键依赖：缺了脚本核心功能不可用 ----
+    local -a critical_cmds=( curl jq unzip openssl )
+    # ---- 重要但可降级：别名 + 探测用命令 ----
+    local -a soft_alias=( iproute2 iptables socat dnsutils xz xxd qrencode )
+    local -a soft_cmd=(   ip       iptables socat dig      xz xxd qrencode )
+
+    # Alpine 特有：glibc 兼容层
     if [[ "$DISTRO" == "alpine" ]]; then
-        _info "更新软件包索引..."
-        if ! timeout 60 apk update 2>&1 | grep -E '^(fetch|OK)' | sed 's/^/  /'; then
-            if ! apk update &>/dev/null; then
-                _err "更新软件包索引失败（可能超时）"
-                return 1
-            fi
-        fi
-        
-        local deps="curl jq unzip iproute2 iptables ip6tables gcompat libc6-compat openssl socat bind-tools xz"
-        _info "安装依赖: $deps"
-        if ! timeout 180 apk add --no-cache $deps 2>&1 | grep -E '^(\(|OK|Installing|Executing)' | sed 's/^/  /'; then
-            # 检查实际安装结果
-            local missing=""
-            for dep in $deps; do
-                apk info -e "$dep" &>/dev/null || missing="$missing $dep"
-            done
-            if [[ -n "$missing" ]]; then
-                _err "依赖安装失败:$missing"
-                return 1
-            fi
-        fi
-        _ok "依赖安装完成"
-    elif [[ "$DISTRO" == "centos" ]]; then
-        _info "安装 EPEL 源..."
-        if ! timeout 120 yum install -y epel-release 2>&1 | grep -E '^(Installing|Verifying|Complete)' | sed 's/^/  /'; then
-            if ! rpm -q epel-release &>/dev/null; then
-                _err "EPEL 源安装失败（可能超时）"
-                return 1
-            fi
-        fi
-        
-        local deps="curl jq unzip iproute iptables vim-common openssl socat bind-utils xz"
-        _info "安装依赖: $deps"
-        if ! timeout 300 yum install -y $deps 2>&1 | grep -E '^(Installing|Verifying|Complete|Downloading)' | sed 's/^/  /'; then
-            # 检查实际安装结果
-            local missing=""
-            for dep in $deps; do
-                rpm -q "$dep" &>/dev/null || missing="$missing $dep"
-            done
-            if [[ -n "$missing" ]]; then
-                _err "依赖安装失败:$missing"
-                return 1
-            fi
-        fi
-        _ok "依赖安装完成"
-    elif [[ "$DISTRO" == "debian" || "$DISTRO" == "ubuntu" ]]; then
-        _info "更新软件包索引..."
-        # 移除 -qq 让用户能看到进度，避免交互卡住
-        if ! DEBIAN_FRONTEND=noninteractive apt-get update 2>&1 | grep -E '^(Hit|Get|Fetched|Reading)' | head -10 | sed 's/^/  /'; then
-            # 即使 grep 没匹配到也继续，只要 apt-get 成功即可
-            :
-        fi
-        
-        local deps="curl jq unzip iproute2 xxd openssl socat dnsutils xz-utils iptables"
-        _info "安装依赖: $deps"
-        # 使用 DEBIAN_FRONTEND 避免交互，显示简化进度，移除 timeout 避免死锁
-        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y $deps 2>&1 | grep -E '^(Setting up|Unpacking|Processing|Get:|Fetched)' | sed 's/^/  /'; then
-            # 检查实际安装结果
-            if ! dpkg -l $deps >/dev/null 2>&1; then
-                _err "依赖安装失败"
-                return 1
-            fi
-        fi
-        _ok "依赖安装完成"
+        soft_alias+=( gcompat libc6-compat )
+        soft_cmd+=(   ""      "" )
     fi
+
+    local i c a
+    for c in "${critical_cmds[@]}"; do
+        command -v "$c" &>/dev/null || { want_aliases+=("$c"); want_cmds+=("$c"); }
+    done
+    for i in "${!soft_alias[@]}"; do
+        local probe="${soft_cmd[$i]}"
+        if [[ -z "$probe" ]]; then
+            want_aliases+=("${soft_alias[$i]}")
+            want_cmds+=("${soft_alias[$i]}")
+        else
+            command -v "$probe" &>/dev/null || { want_aliases+=("${soft_alias[$i]}"); want_cmds+=("$probe"); }
+        fi
+    done
+
+    if [[ ${#want_aliases[@]} -eq 0 ]]; then
+        _ok "系统依赖齐全"
+        return 0
+    fi
+
+    _info "待安装: $(_pm_map_list "${want_aliases[@]}")"
+
+    # 先整体装一次；失败则逐个装，避免一个坏包拖垮全部
+    if ! _pm_install "${want_aliases[@]}"; then
+        _warn "批量安装未完成，改为逐个安装..."
+        for a in "${want_aliases[@]}"; do
+            _pm_install "$a" >/dev/null 2>&1 || _warn "安装失败: $(_pm_map "$DISTRO" "$a")"
+        done
+    fi
+
+    # === 最终校验（以命令可用性为准）===
+    local -a hard_missing=() soft_missing=()
+    for c in "${critical_cmds[@]}"; do
+        command -v "$c" &>/dev/null || hard_missing+=("$c")
+    done
+    for i in "${!soft_alias[@]}"; do
+        local probe="${soft_cmd[$i]}"
+        [[ -z "$probe" ]] && continue
+        command -v "$probe" &>/dev/null || soft_missing+=("$probe")
+    done
+
+    if [[ ${#hard_missing[@]} -ne 0 ]]; then
+        _err "关键依赖安装失败: ${hard_missing[*]}"
+        _err "请手动执行:"
+        _pm_manual_hint "${hard_missing[@]}"
+        _err "常见原因: 软件源不可达 / DNS 异常 / 磁盘满 / 系统架构不支持"
+        return 1
+    fi
+
+    if [[ ${#soft_missing[@]} -ne 0 ]]; then
+        _warn "以下可选依赖未安装: ${soft_missing[*]}"
+        _warn "不影响核心功能，缺失时的表现:"
+        for c in "${soft_missing[@]}"; do
+            case "$c" in
+                ip)       _warn "  ip       -> 端口占用检测可能失效" ;;
+                ss)       _warn "  ss       -> 端口监听状态可能显示不准" ;;
+                iptables) _warn "  iptables -> Hy2/TUIC 端口跳跃不可用" ;;
+                socat)    _warn "  socat    -> 部分证书申请方式不可用" ;;
+                dig)      _warn "  dig      -> 域名解析检测改用 nslookup/getent" ;;
+                xz)       _warn "  xz       -> Sing-box 解压会失败，请改用其他协议" ;;
+                xxd)      _warn "  xxd      -> ShortID 改用 od 生成（同样有效）" ;;
+                qrencode) _warn "  qrencode -> 二维码不显示，可复制链接手动导入" ;;
+            esac
+        done
+    fi
+
+    _ok "系统依赖检查完成"
+    return 0
 }
 
 #═══════════════════════════════════════════════════════════════════════════════
@@ -16453,47 +16973,49 @@ show_all_share_links() {
                 [[ -n "$link" ]] && echo -e "  ${G}$link${NC}" && has_links=true
             fi
             
-            # 生成 IPv6 链接
+            # 生成 IPv6 链接（仅在拿到全局 IPv6 时输出）
             if [[ -n "$ipv6" ]]; then
                 local link=""
-                local ip6="[$ipv6]"
-                case "$protocol" in
-                    vless) link=$(gen_vless_link "$ip6" "$display_port" "$uuid" "$public_key" "$short_id" "$sni" "$country_code") ;;
-                    vless-xhttp) link=$(gen_vless_xhttp_link "$ip6" "$display_port" "$uuid" "$public_key" "$short_id" "$sni" "$path" "$country_code") ;;
-                    vless-vision) link=$(gen_vless_vision_link "$ip6" "$display_port" "$uuid" "$sni" "$country_code") ;;
-                    vless-ws) link=$(gen_vless_ws_link "$ip6" "$display_port" "$uuid" "$sni" "$path" "$country_code") ;;
-                    vmess-ws) link=$(gen_vmess_ws_link "$ip6" "$display_port" "$uuid" "$sni" "$path" "$country_code") ;;
-                    ss2022) link=$(gen_ss2022_link "$ip6" "$display_port" "$method" "$password" "$country_code") ;;
-                    ss-legacy) link=$(gen_ss_legacy_link "$ip6" "$display_port" "$method" "$password" "$country_code") ;;
-                    hy2) link=$(gen_hy2_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
-                    trojan) link=$(gen_trojan_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
-                    trojan-ws) link=$(gen_trojan_ws_link "$ip6" "$display_port" "$password" "$sni" "$path" "$country_code") ;;
-                    snell) link=$(gen_snell_link "$ip6" "$display_port" "$psk" "$version" "$country_code") ;;
-                    snell-v5) link=$(gen_snell_v5_link "$ip6" "$display_port" "$psk" "$version" "$country_code") ;;
-                    tuic) link=$(gen_tuic_link "$ip6" "$display_port" "$uuid" "$password" "$sni" "$country_code") ;;
-                    anytls) link=$(gen_anytls_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
-                    naive) ;; # NaïveProxy 使用域名，不需要 IPv6 链接
-                    socks) link=$(gen_socks_link "$ip6" "$display_port" "$username" "$password" "$country_code") ;;
-                    # ShadowTLS 组合协议 IPv6：没有标准分享链接，显示 Surge/Loon 配置
-                    snell-shadowtls)
-                        echo -e "  ${Y}Surge (IPv6):${NC}"
-                        echo -e "  ${C}${country_code}-Snell-ShadowTLS-v6 = snell, ${ipv6}, ${display_port}, psk=${psk}, version=${version:-4}, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
-                        has_links=true
-                        ;;
-                    snell-v5-shadowtls)
-                        echo -e "  ${Y}Surge (IPv6):${NC}"
-                        echo -e "  ${C}${country_code}-Snell-v5-ShadowTLS-v6 = snell, ${ipv6}, ${display_port}, psk=${psk}, version=5, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
-                        has_links=true
-                        ;;
-                    ss2022-shadowtls)
-                        echo -e "  ${Y}Surge (IPv6):${NC}"
-                        echo -e "  ${C}${country_code}-SS2022-ShadowTLS-v6 = ss, ${ipv6}, ${display_port}, encrypt-method=${method}, password=${password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
-                        echo -e "  ${Y}Loon (IPv6):${NC}"
-                        echo -e "  ${C}${country_code}-SS2022-ShadowTLS-v6 = shadowsocks, ${ipv6}, ${display_port}, ${method}, \"${password}\", shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}${NC}"
-                        has_links=true
-                        ;;
-                esac
-                [[ -n "$link" ]] && echo -e "  ${G}$link${NC}" && has_links=true
+                local ip6=$(_fmt_ipv6_link "$ipv6")
+                if [[ -n "$ip6" ]]; then
+                    case "$protocol" in
+                        vless) link=$(gen_vless_link "$ip6" "$display_port" "$uuid" "$public_key" "$short_id" "$sni" "$country_code") ;;
+                        vless-xhttp) link=$(gen_vless_xhttp_link "$ip6" "$display_port" "$uuid" "$public_key" "$short_id" "$sni" "$path" "$country_code") ;;
+                        vless-vision) link=$(gen_vless_vision_link "$ip6" "$display_port" "$uuid" "$sni" "$country_code") ;;
+                        vless-ws) link=$(gen_vless_ws_link "$ip6" "$display_port" "$uuid" "$sni" "$path" "$country_code") ;;
+                        vmess-ws) link=$(gen_vmess_ws_link "$ip6" "$display_port" "$uuid" "$sni" "$path" "$country_code") ;;
+                        ss2022) link=$(gen_ss2022_link "$ip6" "$display_port" "$method" "$password" "$country_code") ;;
+                        ss-legacy) link=$(gen_ss_legacy_link "$ip6" "$display_port" "$method" "$password" "$country_code") ;;
+                        hy2) link=$(gen_hy2_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
+                        trojan) link=$(gen_trojan_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
+                        trojan-ws) link=$(gen_trojan_ws_link "$ip6" "$display_port" "$password" "$sni" "$path" "$country_code") ;;
+                        snell) link=$(gen_snell_link "$ip6" "$display_port" "$psk" "$version" "$country_code") ;;
+                        snell-v5) link=$(gen_snell_v5_link "$ip6" "$display_port" "$psk" "$version" "$country_code") ;;
+                        tuic) link=$(gen_tuic_link "$ip6" "$display_port" "$uuid" "$password" "$sni" "$country_code") ;;
+                        anytls) link=$(gen_anytls_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
+                        naive) ;; # NaïveProxy 使用域名，不需要 IPv6 链接
+                        socks) link=$(gen_socks_link "$ip6" "$display_port" "$username" "$password" "$country_code") ;;
+                        # ShadowTLS 组合协议 IPv6：没有标准分享链接，显示 Surge/Loon 配置
+                        snell-shadowtls)
+                            echo -e "  ${Y}Surge (IPv6):${NC}"
+                            echo -e "  ${C}${country_code}-Snell-ShadowTLS-v6 = snell, ${ip6}, ${display_port}, psk=${psk}, version=${version:-4}, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
+                            has_links=true
+                            ;;
+                        snell-v5-shadowtls)
+                            echo -e "  ${Y}Surge (IPv6):${NC}"
+                            echo -e "  ${C}${country_code}-Snell-v5-ShadowTLS-v6 = snell, ${ip6}, ${display_port}, psk=${psk}, version=5, reuse=true, tfo=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
+                            has_links=true
+                            ;;
+                        ss2022-shadowtls)
+                            echo -e "  ${Y}Surge (IPv6):${NC}"
+                            echo -e "  ${C}${country_code}-SS2022-ShadowTLS-v6 = ss, ${ip6}, ${display_port}, encrypt-method=${method}, password=${password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
+                            echo -e "  ${Y}Loon (IPv6):${NC}"
+                            echo -e "  ${C}${country_code}-SS2022-ShadowTLS-v6 = shadowsocks, ${ip6}, ${display_port}, ${method}, \"${password}\", shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}${NC}"
+                            has_links=true
+                            ;;
+                    esac
+                    [[ -n "$link" ]] && echo -e "  ${G}$link${NC}" && has_links=true
+                fi
             fi
         done <<< "$cfg_stream"
         
@@ -17035,14 +17557,22 @@ show_single_protocol_info() {
             if [[ "$protocol" == "socks" ]]; then
                 local use_tls=$(echo "$cfg" | jq -r '.tls // "false"')
                 local socks_sni=$(echo "$cfg" | jq -r '.sni // ""')
-                local socks_link
+                local socks_link socks_link6=""
                 if [[ "$use_tls" == "true" ]]; then
                     socks_link="socks5://${username}:${password}@${ip_addr}:${link_port}?tls=true&sni=${socks_sni}#SOCKS5-TLS-${ip_addr}"
+                    # IPv6 版本（仅双栈时输出）
+                    local ip6b=$(_fmt_ipv6_link "$ipv6")
+                    [[ -n "$ip6b" ]] && socks_link6="socks5://${username}:${password}@${ip6b}:${link_port}?tls=true&sni=${socks_sni}#SOCKS5-TLS-${ip6b}"
                 else
                     socks_link="socks5://${username}:${password}@${ip_addr}:${link_port}#SOCKS5-${ip_addr}"
                 fi
                 echo -e "  ${C}分享链接:${NC}"
                 echo -e "  ${G}$socks_link${NC}"
+                if [[ -n "$socks_link6" ]]; then
+                    echo ""
+                    echo -e "  ${C}分享链接 (IPv6):${NC}"
+                    echo -e "  ${G}$socks_link6${NC}"
+                fi
                 echo ""
                 echo -e "  ${C}二维码:${NC}"
                 echo -e "  ${G}$(gen_qr "$socks_link")${NC}"
@@ -17052,6 +17582,30 @@ show_single_protocol_info() {
                 echo ""
                 echo -e "  ${C}二维码:${NC}"
                 echo -e "  ${G}$(gen_qr "$link")${NC}"
+
+                # ===== IPv6 分享链接（双栈时附带，纯 IPv6 时上面那条就是 v6 链接）=====
+                if [[ -n "$ipv4" && -n "$ipv6" && -n "$link" ]]; then
+                    local _pair _link6
+                    _pair=$(_gen_share_link_pair "$protocol" "$ipv4" "$ipv6" "$link_port" "$country_code" \
+                        "$uuid" "$public_key" "$short_id" "$sni" \
+                        "$path" "$password" "$username" "$method" "$psk" "$version" \
+                        "$(echo "$cfg" | jq -r '.domain // empty')" "$(echo "$cfg" | jq -r '.host // empty')")
+                    _link6=$(printf '%s\n' "$_pair" | sed -n 's/^IPV6=//p')
+
+                    # TLS+CDN / CF Tunnel 走域名，没有真正的 IPv6 直连形态，跳过
+                    case "$protocol" in
+                        vless-xhttp-cdn|vless-ws-notls) _link6="" ;;
+                    esac
+
+                    if [[ -n "$_link6" ]]; then
+                        echo ""
+                        echo -e "  ${C}分享链接 (IPv6):${NC}"
+                        echo -e "  ${G}$_link6${NC}"
+                        echo ""
+                        echo -e "  ${C}二维码 (IPv6):${NC}"
+                        echo -e "  ${G}$(gen_qr "$_link6")${NC}"
+                    fi
+                fi
             fi
         elif [[ "$SHOW_JOIN_CODE" != "on" ]]; then
             # ShadowTLS 协议且 JOIN 码关闭时，提示用户
@@ -17061,10 +17615,16 @@ show_single_protocol_info() {
         fi
     fi
     
-    # IPv6 提示（仅双栈时显示，纯 IPv6 已经使用 IPv6 地址了）
+    # IPv6 可用性提示
+    # 双栈：上面已经输出 IPv6 链接，这里只做一句确认
+    # 纯 IPv6：主链接本身就是 v6，不需要提示
     if [[ -n "$ipv4" && -n "$ipv6" ]]; then
         echo ""
-        echo -e "  ${D}提示: 服务器支持 IPv6 ($ipv6)，如需使用请自行替换地址${NC}"
+        echo -e "  ${D}提示: 服务器为双栈，已同时输出 IPv4 与 IPv6 两种链接${NC}"
+        echo -e "  ${D}      客户端支持 IPv6 时优先用 v6 链接，可直连免端口转发${NC}"
+    elif [[ -n "$ipv6" && -z "$ipv4" ]]; then
+        echo ""
+        echo -e "  ${D}提示: 本机为纯 IPv6 环境，链接已使用 IPv6 地址${NC}"
     fi
     
     # 自签名证书提示（VMess-WS、VLESS-WS、VLESS-Vision、Trojan、Trojan-WS、Hysteria2 使用自签名证书时）
@@ -21048,7 +21608,7 @@ setup_nginx_sub() {
         use_https="false"
     fi
 
-    local ssl_listen="" ssl_block=""
+    local ssl_listen="" ssl_block="" v6_listen1="" v6_listen2=""
     if [[ "$use_https" == "true" ]]; then
         ssl_listen=" ssl http2"
         ssl_block=$(cat <<EOF
@@ -21059,11 +21619,12 @@ setup_nginx_sub() {
 EOF
 )
     fi
+    v6_listen1=$(_nginx_listen_v6 "$sub_port" "${ssl_listen# }")
 
     cat > "$nginx_conf" << EOF
 server {
     listen $sub_port$ssl_listen;
-    listen [::]:$sub_port$ssl_listen;
+    $v6_listen1
     server_name ${domain:-_};
 $ssl_block
     # 订阅路径 (alias 直指文件，避免 try_files 误判)
@@ -21334,7 +21895,7 @@ setup_subscription_interactive() {
         cat > "$nginx_conf" << EOF
 server {
     listen $sub_port ssl http2;
-    listen [::]:$sub_port ssl http2;
+$(_nginx_listen_v6 "$sub_port" "ssl http2")
     server_name $server_name;
 
     ssl_certificate $cert_file;
@@ -21374,7 +21935,7 @@ EOF
         cat > "$nginx_conf" << EOF
 server {
     listen $sub_port;
-    listen [::]:$sub_port;
+$(_nginx_listen_v6 "$sub_port" "")
     server_name $server_name;
 
     root /var/www/html;
@@ -25045,6 +25606,22 @@ case "${1:-}" in
         check_reality_keys
         exit $?
         ;;
+    --install-deps)
+        # 独立运行依赖检查与安装（可重复执行，幂等）
+        check_dependencies
+        exit $?
+        ;;
+    --check-ipv6)
+        # 打印 IPv6 探测结果，用于排查 IPv6 链接为什么不显示
+        echo "IPv4: $(get_ipv4)"
+        echo "IPv6: $(get_ipv6)"
+        if _nginx_can_listen_v6; then
+            echo "Nginx IPv6 监听: 可用"
+        else
+            echo "Nginx IPv6 监听: 不可用（将只生成 IPv4 监听）"
+        fi
+        exit 0
+        ;;
     --help|-h)
         echo "用法: $0 [选项]"
         echo ""
@@ -25056,6 +25633,8 @@ case "${1:-}" in
         echo "  --repair-reality-link [--dry-run]"
         echo "                       用当前服务端私钥重写 Reality 节点文件与分享链接"
         echo "  --check-reality-keys 校验 Reality 私钥与节点公钥是否配对"
+        echo "  --install-deps       检查并安装系统依赖（幂等，可重复执行）"
+        echo "  --check-ipv6         打印 IPv4/IPv6 探测结果与 nginx IPv6 监听能力"
         echo "  --help, -h           显示帮助信息"
         echo ""
         echo "无参数时启动交互式菜单"
