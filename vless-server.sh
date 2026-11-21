@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/Felix666-ship-It/vless-all-in-one2
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.4.13"
+readonly VERSION="3.4.14"
 readonly AUTHOR="Felix666-ship-It"
 readonly REPO_URL="https://github.com/Felix666-ship-It/vless-all-in-one2"
 readonly SCRIPT_REPO="Felix666-ship-It/vless-all-in-one2"
@@ -7361,28 +7361,58 @@ _get_latest_script_version() {
     local version=""
 
     _init_version_cache
-    if [[ "$force" != "true" ]] && _is_cache_fresh "$SCRIPT_VERSION_CACHE_FILE"; then
-        cat "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null
-        return 0
-    fi
 
-    if [[ "$force" != "true" && "$use_cache" == "true" ]]; then
-        local cached_version
-        cached_version=$(cat "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null)
-        if [[ -n "$cached_version" ]]; then
-            echo "$cached_version"
+    # 缓存命中时还要确认缓存值不比"本脚本版本"旧，否则宁可重新请求
+    # 原因: 打进镜像/脚本副本里的旧缓存会让新脚本永远提示"已是最新版本"
+    if [[ "$force" != "true" ]] && _is_cache_fresh "$SCRIPT_VERSION_CACHE_FILE"; then
+        local _cached
+        _cached=$(cat "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null)
+        if [[ -n "$_cached" ]] && _version_gt "$_cached" "$VERSION"; then
+            echo "$_cached"
             return 0
         fi
     fi
 
-    version=$(_get_latest_version "$SCRIPT_REPO" "false" "true" 2>/dev/null)
+    # 优先: GitHub Release（脚本发布的正式渠道）
+    version=$(_get_release_tag "Felix666-ship-It/vless-all-in-one2")
+    # 回退: GitHub Release 不可用时读脚本本体里的 VERSION（兼顾打不开 API 的环境）
     if [[ -z "$version" ]]; then
-        version=$(_get_latest_tag_version "$SCRIPT_REPO")
+        version=$(_get_raw_script_version)
     fi
+    # 最后回退: tag
+    if [[ -z "$version" ]]; then
+        version=$(_get_latest_tag_version "Felix666-ship-It/vless-all-in-one2")
+    fi
+
     [[ -z "$version" ]] && return 1
 
     echo "$version" > "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null || true
     echo "$version"
+}
+
+# 读取远端脚本本体的 VERSION 行（绕过 GitHub API，raw 域名可直接取）
+_get_raw_script_version() {
+    local url="https://raw.githubusercontent.com/${SCRIPT_REPO}/main/vless-server.sh"
+    local body
+    body=$(curl -sL --connect-timeout 5 --max-time 15 "$url" 2>/dev/null) || return 1
+    [[ -z "$body" ]] && return 1
+    printf '%s\n' "$body" | grep -m1 '^readonly VERSION=' | cut -d'"' -f2
+}
+
+# 读取仓库最新 Release 的 tag（去掉前缀 v）
+# 显式校验 HTTP 状态码: 404 时 curl 退出码仍为 0, 必须自己判断
+_get_release_tag() {
+    local repo="$1"
+    local response http_code body
+    response=$(curl -sL --connect-timeout 5 --max-time 10 -w $'\n%{http_code}' \
+        "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null) || return 1
+    http_code=$(printf '%s' "$response" | tail -n1 | tr -d '[:space:]')
+    body=$(printf '%s' "$response" | sed '$d')
+    case "$http_code" in
+        200) ;;
+        *)   return 1 ;;
+    esac
+    printf '%s\n' "$body" | jq -r '.tag_name // empty' 2>/dev/null | sed 's/^v//' | sed '/^$/d'
 }
 
 # 语义化版本比较（v1 > v2 返回 0）
@@ -7402,8 +7432,14 @@ _version_gt() {
 # 后台异步检查脚本版本（用于主菜单提示）
 _check_script_update_async() {
     _init_version_cache
+    # 缓存新鲜且确实比当前版本新才跳过；否则后台重查
+    # （旧缓存 3.4.11 遇到当前 3.4.13 时必须重查，否则永远看不到更新）
     if _is_cache_fresh "$SCRIPT_VERSION_CACHE_FILE"; then
-        return 0
+        local _cached
+        _cached=$(cat "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null)
+        if [[ -n "$_cached" ]] && _version_gt "$_cached" "$VERSION"; then
+            return 0
+        fi
     fi
     (
         _get_latest_script_version "false" "true" >/dev/null 2>&1 || exit 0
@@ -25348,17 +25384,22 @@ do_update() {
     
     echo -e "  当前版本: ${G}v${VERSION}${NC}"
     _info "检查最新版本..."
-    
+
     _init_version_cache
+    # 手动点"检查更新"必须撞网络，不能吃缓存
+    rm -f "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null
     local tmp_file="" remote_ver=""
-    remote_ver=$(_get_latest_script_version "true" "false")
+    remote_ver=$(_get_latest_script_version "false" "true")
     if [[ -z "$remote_ver" ]]; then
         _err "无法获取远程版本信息"
+        _warn "可尝试手动覆盖:"
+        echo -e "  ${C}wget -O /usr/local/bin/vless-server.sh '${SCRIPT_RAW_URL}?t='\$\(date +%s\)${NC}"
+        echo -e "  ${C}chmod +x /usr/local/bin/vless-server.sh${NC}"
         return 1
     fi
-    
+
     echo -e "  最新版本: ${C}v${remote_ver}${NC}"
-    
+
     # 比较版本 - 只有远程版本更新时才提示更新
     if ! _version_gt "$remote_ver" "$VERSION"; then
         _ok "已是最新版本"
@@ -25417,6 +25458,62 @@ do_update() {
         _err "更新失败"
         return 1
     fi
+}
+
+# 无交互自更新：直接拉远端脚本覆盖本机，不比较版本
+# 用于 --update-script，或版本检测异常时强行升级
+_self_update_force() {
+    local target="/usr/local/bin/vless-server.sh"
+    local running="$0"
+    local running_path=""
+
+    if [[ "$running" == /* ]]; then
+        running_path=$(readlink -f "$running" 2>/dev/null || echo "$running")
+    elif [[ -f "$running" ]]; then
+        running_path="$(cd "$(dirname "$running")" 2>/dev/null && pwd)/$(basename "$running")"
+    fi
+
+    _info "从 ${SCRIPT_RAW_URL} 拉取最新脚本..."
+
+    local tmp
+    tmp=$(mktemp 2>/dev/null) || { _err "无法创建临时文件"; return 1; }
+    # 加时间戳参数绕过 raw 域名缓存
+    if ! curl -fsSL --connect-timeout 10 --max-time 60 \
+        -o "$tmp" "${SCRIPT_RAW_URL}?t=$(date +%s)" 2>/dev/null; then
+        rm -f "$tmp"
+        _err "下载失败，请检查网络或手动执行:"
+        echo -e "  ${C}wget -O $target '${SCRIPT_RAW_URL}?t='\$(date +%s)${NC}"
+        return 1
+    fi
+
+    local new_ver
+    new_ver=$(grep -m1 '^readonly VERSION=' "$tmp" 2>/dev/null | cut -d'"' -f2)
+    if [[ -z "$new_ver" ]]; then
+        rm -f "$tmp"
+        _err "下载内容异常（未找到版本号），已放弃覆盖"
+        return 1
+    fi
+
+    # 目标脚本先备份
+    if [[ -f "$target" ]]; then
+        cp -f "$target" "${target}.bak.$(_get_file_mtime "$target")" 2>/dev/null || \
+            cp -f "$target" "${target}.bak" 2>/dev/null
+    fi
+
+    if cp -f "$tmp" "$target" && chmod +x "$target"; then
+        rm -f "$tmp"
+        ln -sf "$target" /usr/local/bin/vless 2>/dev/null
+        ln -sf "$target" /usr/bin/vless 2>/dev/null
+        hash -r 2>/dev/null
+        # 清掉版本缓存，避免下次又读到旧值
+        rm -f "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null
+        _ok "已更新: v${VERSION} -> v${new_ver}  ($target)"
+        return 0
+    fi
+
+    rm -f "$tmp"
+    _err "写入 $target 失败"
+    return 1
 }
 
 main_menu() {
@@ -25622,6 +25719,28 @@ case "${1:-}" in
         fi
         exit 0
         ;;
+    --check-update)
+        # 只检查版本，不更新。绕过缓存，直接撞网络
+        rm -f "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null
+        echo "当前版本: v$VERSION"
+        _remote=$(_get_latest_script_version "false" "true")
+        if [[ -z "$_remote" ]]; then
+            echo "远端版本: 获取失败"
+            exit 1
+        fi
+        echo "远端版本: v$_remote"
+        if _version_gt "$_remote" "$VERSION"; then
+            echo "状态: 有新版本"
+            exit 0
+        fi
+        echo "状态: 已是最新"
+        exit 0
+        ;;
+    --update-script)
+        # 无交互强制更新（不等版本比较，直接覆盖）
+        _self_update_force
+        exit $?
+        ;;
     --help|-h)
         echo "用法: $0 [选项]"
         echo ""
@@ -25635,6 +25754,8 @@ case "${1:-}" in
         echo "  --check-reality-keys 校验 Reality 私钥与节点公钥是否配对"
         echo "  --install-deps       检查并安装系统依赖（幂等，可重复执行）"
         echo "  --check-ipv6         打印 IPv4/IPv6 探测结果与 nginx IPv6 监听能力"
+        echo "  --check-update       检查脚本版本（绕过缓存）"
+        echo "  --update-script      无交互强制更新脚本到远端最新"
         echo "  --help, -h           显示帮助信息"
         echo ""
         echo "无参数时启动交互式菜单"
