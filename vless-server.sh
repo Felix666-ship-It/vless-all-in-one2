@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/Felix666-ship-It/vless-all-in-one2
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.4.16"
+readonly VERSION="3.4.17"
 readonly AUTHOR="Felix666-ship-It"
 readonly REPO_URL="https://github.com/Felix666-ship-It/vless-all-in-one2"
 readonly SCRIPT_REPO="Felix666-ship-It/vless-all-in-one2"
@@ -5854,6 +5854,108 @@ get_ip_suffix() {
         # IPv4: 取最后一个点后面的数字
         echo "${ip##*.}"
     fi
+}
+
+# 解析域名的 A / AAAA 记录（返回 0 表示至少有一条）
+_dns_records() {
+    local name="$1" type="$2"
+    if command -v dig &>/dev/null; then
+        dig +short +time=3 +tries=1 "$name" "$type" 2>/dev/null | grep -E '^[0-9a-fA-F:.]+$'
+    elif command -v getent &>/dev/null; then
+        case "$type" in
+            A)    getent ahostsv4 "$name" 2>/dev/null | awk '{print $1}' | sort -u ;;
+            AAAA) getent ahostsv6 "$name" 2>/dev/null | awk '{print $1}' | sort -u ;;
+        esac
+    fi
+}
+
+# 校验 Reality 的 dest 是否可用
+# Reality 服务端必须能把 ClientHello 转发给 dest 并拿回真实 TLS 握手；
+# dest 若不是可用的 TLS1.3 站点，握手会直接失败（表现为客户端 ECONNRESET / 超时）。
+# 用法: _reality_dest_check <host> [port]
+# 返回 0 = 可用；1 = 不可用
+_reality_dest_check() {
+    local host="${1:-}" port="${2:-443}"
+    [[ -z "$host" ]] && return 1
+
+    # 1. 至少要能解析出一个地址
+    local a4 a6
+    a4=$(_dns_records "$host" A | head -1)
+    a6=$(_dns_records "$host" AAAA | head -1)
+    if [[ -z "$a4" && -z "$a6" ]]; then
+        return 1
+    fi
+
+    # 2. 本机只有 IPv6 时，dest 必须有 AAAA
+    if [[ -z "$a4" && -n "$a6" ]]; then
+        # 纯 v6 环境，正常
+        :
+    elif [[ -n "$a4" && -z "$a6" ]]; then
+        # dest 只有 A：若本机没有 IPv4 出口则不可达
+        if ! _has_ipv4_egress; then
+            return 1
+        fi
+    fi
+
+    # 3. 必须能完成 TLS1.3 握手
+    command -v openssl &>/dev/null || return 0   # 无 openssl 时不阻塞安装
+    local out
+    out=$(echo | timeout 8 openssl s_client -connect "${host}:${port}" \
+        -servername "$host" -tls1_3 -alpn h2 2>/dev/null)
+    [[ "$out" == *"TLSv1.3"* ]] || return 1
+    [[ "$out" == *"BEGIN CERTIFICATE"* ]] || return 1
+    return 0
+}
+
+# 本机是否有 IPv4 出网能力
+_has_ipv4_egress() {
+    # 有默认 v4 路由
+    if command -v ip &>/dev/null; then
+        ip -4 route show default 2>/dev/null | grep -q . && return 0
+    fi
+    # 退一步：能拿到 v4 地址
+    [[ -n "$(get_ipv4)" ]] && return 0
+    return 1
+}
+
+# 安装时对 SNI/dest 做一次体检并打印结论（只警告，不阻断）
+_reality_dest_warn() {
+    local sni="${1:-}"
+    local port="${2:-443}"
+    [[ -z "$sni" ]] && return 0
+
+    local a4 a6
+    a4=$(_dns_records "$sni" A | head -1)
+    a6=$(_dns_records "$sni" AAAA | head -1)
+
+    local v6_only=false
+    _has_ipv4_egress || v6_only=true
+
+    echo "" >&2
+    echo -e "  ${D}Reality dest 检查: ${sni}:${port}${NC}" >&2
+    echo -e "  ${D}  A 记录: ${a4:-无}   AAAA 记录: ${a6:-无}${NC}" >&2
+
+    if [[ -z "$a4" && -z "$a6" ]]; then
+        _err "SNI 域名无法解析，Reality 握手必然失败" >&2
+        _warn "请换一个真实站点，例如 support.apple.com / www.apple.com / www.microsoft.com" >&2
+        return 1
+    fi
+
+    if [[ "$v6_only" == "true" && -z "$a6" ]]; then
+        _err "本机无 IPv4 出口，而 ${sni} 没有 AAAA 记录，dest 无法连通" >&2
+        _warn "请换一个支持 IPv6 的真实站点，例如 support.apple.com / www.apple.com" >&2
+        return 1
+    fi
+
+    if ! _reality_dest_check "$sni" "$port"; then
+        _err "dest 无法完成 TLS1.3 握手，Reality 将连不上" >&2
+        _warn "这个域名不像真实站点，请改用真实站点作 SNI" >&2
+        _warn "推荐: support.apple.com  www.apple.com  www.microsoft.com  www.cloudflare.com" >&2
+        return 1
+    fi
+
+    _ok "dest 可用（TLS1.3 握手正常）" >&2
+    return 0
 }
 
 # 生成 IPv6 版分享链接（仅当拿到全局 IPv6 时返回，否则输出空）
@@ -18866,6 +18968,12 @@ do_install_server() {
             if [[ -z "$cert_domain" ]]; then
                 gen_self_cert "$final_sni"
             fi
+
+            # Reality dest 体检：自定义 SNI 若不是真实 TLS1.3 站点，装完必连不上
+            if ! _reality_dest_warn "$final_sni" 443; then
+                read -rp "  dest 检查未通过，仍要继续? [y/N]: " force_install
+                [[ "$force_install" =~ ^[yY]$ ]] || return 1
+            fi
             
             echo ""
             _line
@@ -18923,6 +19031,12 @@ do_install_server() {
                 
                 # 询问SNI配置
                 local final_sni=$(ask_sni_config "$(gen_sni)" "$cert_domain")
+
+                # Reality dest 体检
+                if ! _reality_dest_warn "$final_sni" 443; then
+                    read -rp "  dest 检查未通过，仍要继续? [y/N]: " force_install
+                    [[ "$force_install" =~ ^[yY]$ ]] || return 1
+                fi
                 
                 echo ""
                 _line
@@ -25828,6 +25942,27 @@ case "${1:-}" in
         fi
         exit 0
         ;;
+    --check-dest)
+        # 校验 Reality 的 SNI/dest 是否是可用站点
+        # 用法: vless --check-dest <域名> [端口]
+        _d_host="${2:-}"
+        _d_port="${3:-443}"
+        if [[ -z "$_d_host" ]]; then
+            echo "用法: $0 --check-dest <域名> [端口]"
+            exit 1
+        fi
+        echo "脚本版本: v${VERSION}"
+        echo "本机 IPv4 出网: $(_has_ipv4_egress && echo 是 || echo 否)"
+        echo "A 记录   : $(_dns_records "$_d_host" A | tr '\n' ' ')"
+        echo "AAAA 记录: $(_dns_records "$_d_host" AAAA | tr '\n' ' ')"
+        if _reality_dest_check "$_d_host" "$_d_port"; then
+            echo "结论: dest 可用（TLS1.3 握手正常）"
+            exit 0
+        fi
+        echo "结论: dest 不可用 —— Reality 装上也连不通"
+        echo "推荐改用真实站点: support.apple.com  www.apple.com  www.microsoft.com  www.cloudflare.com"
+        exit 1
+        ;;
     --help|-h)
         echo "用法: $0 [选项]"
         echo ""
@@ -25845,6 +25980,7 @@ case "${1:-}" in
         echo "  --update-script      无交互强制更新脚本到远端最新"
         echo "  --version, -v        显示脚本版本与路径"
         echo "  --debug-x25519       诊断 xray x25519 输出解析"
+        echo "  --check-dest <域名>  校验 Reality 的 SNI/dest 是否可用"
         echo "  --help, -h           显示帮助信息"
         echo ""
         echo "无参数时启动交互式菜单"
