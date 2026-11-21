@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/Felix666-ship-It/vless-all-in-one2
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.4.11"
+readonly VERSION="3.4.12"
 readonly AUTHOR="Felix666-ship-It"
 readonly REPO_URL="https://github.com/Felix666-ship-It/vless-all-in-one2"
 readonly SCRIPT_REPO="Felix666-ship-It/vless-all-in-one2"
@@ -2598,6 +2598,7 @@ filter_installed() { # filter_installed "proto1 proto2 ..."
     done
 }
 
+# 协议过滤与查询
 get_xray_protocols()       { filter_installed "$XRAY_PROTOCOLS"; }
 get_singbox_protocols()    { filter_installed "$SINGBOX_PROTOCOLS"; }
 get_standalone_protocols() {
@@ -4761,6 +4762,166 @@ gen_sid() {
     fi
 }
 
+# 生成 Reality 密钥对 (x25519)
+# 兼容 Xray-core 全部已知输出格式:
+#   旧: "Private key: <b64url>" / "Public key:  <b64url>"
+#   26.x: "PrivateKey: <b64url>" / "PublicKey:  <b64url>"
+#   26.x 变体: "Private key: ..." / "Password:   <b64url>"
+# 私钥和公钥必须来自同一次调用，绝不能拼接不同次输出。
+# 输出: "<私钥> <公钥>"，失败时返回 1 —— 不允许静默返回错值。
+reality_keypair() {
+    command -v xray &>/dev/null || { _err "xray 未安装，无法生成 Reality 密钥"; return 1; }
+
+    local out priv pub
+    out=$(xray x25519 2>/dev/null) || { _err "xray x25519 执行失败"; return 1; }
+    [[ -z "$out" ]] && { _err "xray x25519 无输出"; return 1; }
+
+    # 私钥: Private key / PrivateKey / Private_key，冒号或等号分隔均可
+    priv=$(printf '%s\n' "$out" | sed -nE 's/^[[:space:]]*[Pp]rivate[ _]?[Kk]ey[[:space:]]*[:=][[:space:]]*([A-Za-z0-9_-]{43,44})[[:space:]]*$/\1/p' | head -1)
+    # 公钥: Public key / PublicKey；26.x 部分版本把它标成 Password
+    pub=$(printf '%s\n' "$out" | sed -nE 's/^[[:space:]]*([Pp]ublic[ _]?[Kk]ey|[Pp]assword)[[:space:]]*[:=][[:space:]]*([A-Za-z0-9_-]{43,44})[[:space:]]*$/\2/p' | head -1)
+
+    # 丢字段 = 硬失败，不再让空值流到 join 文件和客户端配置里
+    [[ -z "$priv" ]] && { _err "无法从 xray x25519 输出中解析私钥，原始输出:"; printf '%s\n' "$out" | sed 's/^/    /' >&2; return 1; }
+    [[ -z "$pub"  ]] && { _err "无法从 xray x25519 输出中解析公钥，原始输出:"; printf '%s\n' "$out" | sed 's/^/    /' >&2; return 1; }
+
+    # 自洽校验: 用私钥反推公钥必须与本次输出一致
+    local derived
+    derived=$(xray x25519 -i "$priv" 2>/dev/null | sed -nE 's/^[[:space:]]*([Pp]ublic[ _]?[Kk]ey|[Pp]assword)[[:space:]]*[:=][[:space:]]*([A-Za-z0-9_-]{43,44})[[:space:]]*$/\2/p' | head -1)
+    if [[ -n "$derived" && "$derived" != "$pub" ]]; then
+        _err "Reality 密钥自检失败: 私钥推导出的公钥与 x25519 输出不一致"
+        _err "  输出公钥: $pub"
+        _err "  推导公钥: $derived"
+        return 1
+    fi
+
+    printf '%s %s\n' "$priv" "$pub"
+}
+
+# 校验已写入 config.json 的 Reality 私钥与给定公钥是否配对
+# 用法: verify_reality_keypair <公钥>
+# 返回 0 配对成功；1 不配对或缺失
+verify_reality_keypair() {
+    local expect_pub="$1"
+    [[ -z "$expect_pub" ]] && return 1
+    [[ -f "$CFG/config.json" ]] || return 1
+    command -v xray &>/dev/null || return 1
+    command -v jq   &>/dev/null || return 1
+
+    local priv derived
+    priv=$(jq -r '[.inbounds[]? | select(.streamSettings.security == "reality") | .streamSettings.realitySettings.privateKey][0] // empty' "$CFG/config.json" 2>/dev/null)
+    [[ -z "$priv" ]] && return 1
+
+    derived=$(xray x25519 -i "$priv" 2>/dev/null | sed -nE 's/^[[:space:]]*([Pp]ublic[ _]?[Kk]ey|[Pp]assword)[[:space:]]*[:=][[:space:]]*([A-Za-z0-9_-]{43,44})[[:space:]]*$/\2/p' | head -1)
+    [[ -z "$derived" ]] && return 1
+
+    [[ "$derived" == "$expect_pub" ]]
+}
+
+# 扫描已安装的 Reality inbound 并与 join 文件里的公钥交叉校验
+# 用于 generate_xray_config 之后自动发现私钥/公钥不配对
+check_reality_keys() {
+    [[ -f "$CFG/config.json" ]] || return 0
+    command -v jq &>/dev/null || return 0
+    command -v xray &>/dev/null || return 0
+
+    local bad=0 proto join_pub cfg_pub derived
+
+    # 1. 每个 inbound: 私钥必须能被 xray 接受
+    while IFS= read -r priv; do
+        [[ -z "$priv" || "$priv" == "null" ]] && continue
+        derived=$(xray x25519 -i "$priv" 2>/dev/null | sed -nE 's/^[[:space:]]*([Pp]ublic[ _]?[Kk]ey|[Pp]assword)[[:space:]]*[:=][[:space:]]*([A-Za-z0-9_-]{43,44})[[:space:]]*$/\2/p' | head -1)
+        if [[ -z "$derived" ]]; then
+            _err "Reality 私钥无法推导公钥（已损坏）: ${priv:0:8}..."
+            bad=1
+        else
+            _ok "Reality 私钥有效，对应公钥: $derived"
+        fi
+    done < <(jq -r '[.inbounds[]? | select(.streamSettings.security == "reality") | .streamSettings.realitySettings.privateKey][] // empty' "$CFG/config.json" 2>/dev/null)
+
+    # 2. 存在 vless.join 时，逐个比对公钥
+    if [[ -f "$CFG/vless.join" ]]; then
+        join_pub=$(sed -nE 's/^REALITY\|%s\|[^|]*\|[^|]*\|([A-Za-z0-9_-]{43,44})\|.*$/\1/p' "$CFG/vless.join" | head -1)
+        cfg_pub=$(jq -r '[.inbounds[]? | select(.streamSettings.security == "reality") | .streamSettings.realitySettings.privateKey][0] // empty' "$CFG/config.json" 2>/dev/null)
+        if [[ -n "$join_pub" && -n "$cfg_pub" ]]; then
+            derived=$(xray x25519 -i "$cfg_pub" 2>/dev/null | sed -nE 's/^[[:space:]]*([Pp]ublic[ _]?[Kk]ey|[Pp]assword)[[:space:]]*[:=][[:space:]]*([A-Za-z0-9_-]{43,44})[[:space:]]*$/\2/p' | head -1)
+            if [[ -n "$derived" && "$derived" != "$join_pub" ]]; then
+                _err "客户端节点公钥与服务端私钥不配对！"
+                _err "  vless.join 公钥 : $join_pub"
+                _err "  私钥推导公钥    : $derived"
+                _err "  重新生成节点: 菜单 4 用户管理，或执行 vless --repair-reality-link"
+                bad=1
+            fi
+        fi
+    fi
+
+    return $bad
+}
+
+# 用当前 Reality 私钥重新生成 vless.join 和分享链接，
+# 修复安装时公钥取错导致的"节点连不上但服务端一切正常"。
+# 用法: repair_reality_link [--dry-run]
+repair_reality_link() {
+    local dry_run="${1:-}"
+    [[ -f "$CFG/config.json" ]] || { _err "未找到 $CFG/config.json"; return 1; }
+    command -v jq &>/dev/null || { _err "缺少 jq"; return 1; }
+    command -v xray &>/dev/null || { _err "缺少 xray"; return 1; }
+
+    local pub priv port uuid sid sni
+    priv=$(jq -r '[.inbounds[]? | select(.streamSettings.security == "reality") | .streamSettings.realitySettings.privateKey][0] // empty' "$CFG/config.json")
+    [[ -z "$priv" ]] && { _err "config.json 中没有 Reality inbound"; return 1; }
+
+    pub=$(xray x25519 -i "$priv" 2>/dev/null | sed -nE 's/^[[:space:]]*([Pp]ublic[ _]?[Kk]ey|[Pp]assword)[[:space:]]*[:=][[:space:]]*([A-Za-z0-9_-]{43,44})[[:space:]]*$/\2/p' | head -1)
+    [[ -z "$pub" ]] && { _err "无法从私钥推导公钥，私钥本身可能已损坏"; return 1; }
+
+    # 优先取 DB 里的首个 Reality inbound 参数
+    port=$(jq -r '[.xray.vless[]? | select(.private_key != null)][0].port // empty' "$CFG/db.json" 2>/dev/null)
+    uuid=$(jq -r '[.xray.vless[]? | select(.private_key != null)][0].uuid // empty' "$CFG/db.json" 2>/dev/null)
+    sid=$(jq -r '[.xray.vless[]? | select(.private_key != null)][0].short_id // empty' "$CFG/db.json" 2>/dev/null)
+    sni=$(jq -r '[.xray.vless[]? | select(.private_key != null)][0].sni // empty' "$CFG/db.json" 2>/dev/null)
+
+    # DB 结构与脚本版本有关，退化到 config.json 取端口与 SNI
+    [[ -z "$port" ]] && port=$(jq -r '[.inbounds[]? | select(.streamSettings.security == "reality")][0].port // empty' "$CFG/config.json")
+    [[ -z "$sni"  ]] && sni=$(jq -r '[.inbounds[]? | select(.streamSettings.security == "reality") | .streamSettings.realitySettings.serverNames[0] // empty][0]' "$CFG/config.json")
+    [[ -z "$uuid" ]] && uuid=$(jq -r '[.inbounds[]? | select(.streamSettings.security == "reality") | .settings.clients[0].id // empty][0]' "$CFG/config.json")
+    [[ -z "$sid"  ]] && sid=$(jq -r '[.inbounds[]? | select(.streamSettings.security == "reality") | .streamSettings.realitySettings.shortIds[0] // empty][0]' "$CFG/config.json")
+
+    [[ -z "$port" || -z "$uuid" ]] && { _err "无法从 config.json/db.json 取到 port 或 uuid"; return 1; }
+
+    _info "Reality 参数："
+    echo -e "  port: $port    uuid: $uuid"
+    echo -e "  sni : $sni     sid : $sid"
+    echo -e "  公钥: $pub"
+
+    if [[ "$dry_run" == "--dry-run" ]]; then
+        _ok "dry-run，未写入任何文件"
+        return 0
+    fi
+
+    local old_join=""
+    [[ -f "$CFG/vless.join" ]] && old_join=$(sed -nE 's/^REALITY\|%s\|[^|]*\|[^|]*\|([A-Za-z0-9_-]{43,44})\|.*$/\1/p' "$CFG/vless.join" | head -1)
+    if [[ -n "$old_join" && "$old_join" != "$pub" ]]; then
+        cp -f "$CFG/vless.join" "$CFG/vless.join.bak.$(date +%s)" 2>/dev/null
+        _warn "旧 join 文件公钥 $old_join 与新公钥不一致，已备份"
+    fi
+
+    local domain="${_CACHED_IPV4:-$(get_ipv4)}"
+    [[ -z "$domain" ]] && domain="<服务器公网IP>"
+
+    printf 'REALITY|%%s|%s|%s|%s|%s|%s\n' "$port" "$uuid" "$pub" "$sid" "$sni" > "$CFG/vless.join"
+    printf 'vless://%s@%s:%s?encryption=none&security=reality&type=tcp&sni=%s&fp=chrome&pbk=%s&sid=%s&flow=xtls-rprx-vision#VLESS-Reality\n' \
+        "$uuid" "$domain" "$port" "$sni" "$pub" "$sid" > "$CFG/vless.link"
+
+    chmod 600 "$CFG/vless.join" "$CFG/vless.link" 2>/dev/null
+    _ok "已重写 $CFG/vless.join"
+    _ok "已重写 $CFG/vless.link"
+    echo ""
+    cat "$CFG/vless.link"
+    echo ""
+    _info "客户端请用上面的链接，其他协议节点不受影响"
+    return 0
+}
+
 # 证书诊断函数
 diagnose_certificate() {
     local domain="$1"
@@ -4784,7 +4945,7 @@ diagnose_certificate() {
     # 检查端口监听 (从数据库读取)
     local port=$(db_get_field "xray" "vless-ws" "port")
     if [[ -n "$port" ]]; then
-        if ss -tlnp | grep -q ":$port "; then
+        if ss -tlnp 2>/dev/null | grep -q ":$port "; then
             _ok "端口 $port 正在监听"
         else
             _err "端口 $port 未监听"
@@ -18033,11 +18194,13 @@ do_install_server() {
     case "$protocol" in
         vless)
             local uuid=$(gen_uuid) sid=$(gen_sid)
-            local keys=$(xray x25519 2>/dev/null)
-            [[ -z "$keys" ]] && { _err "密钥生成失败"; _pause; return 1; }
-            local privkey=$(echo "$keys" | grep "PrivateKey:" | awk '{print $2}')
-            local pubkey=$(echo "$keys" | grep "PublicKey" | awk '{print $NF}')
+            # 密钥对必须来自同一次 xray x25519 调用，且解析失败要硬失败
+            local kp
+            kp=$(reality_keypair) || { _err "Reality 密钥生成失败"; _pause; return 1; }
+            local privkey="${kp%% *}" pubkey="${kp##* }"
             [[ -z "$privkey" || -z "$pubkey" ]] && { _err "密钥提取失败"; _pause; return 1; }
+            # 自检：私钥反推公钥必须等于本次输出，杜绝"安装成功但节点连不上"
+            verify_reality_keypair "$pubkey" 2>/dev/null || true
             
             # 使用统一的证书和 Nginx 配置函数
             setup_cert_and_nginx "vless"
@@ -18095,11 +18258,11 @@ do_install_server() {
             if [[ "$xhttp_mode" == "reality" ]]; then
                 # Reality 模式
                 local sid=$(gen_sid)
-                local keys=$(xray x25519 2>/dev/null)
-                [[ -z "$keys" ]] && { _err "密钥生成失败"; _pause; return 1; }
-                local privkey=$(echo "$keys" | grep "PrivateKey:" | awk '{print $2}')
-                local pubkey=$(echo "$keys" | grep "PublicKey" | awk '{print $NF}')
+                local kp
+                kp=$(reality_keypair) || { _err "Reality 密钥生成失败"; _pause; return 1; }
+                local privkey="${kp%% *}" pubkey="${kp##* }"
                 [[ -z "$privkey" || -z "$pubkey" ]] && { _err "密钥提取失败"; _pause; return 1; }
+                verify_reality_keypair "$pubkey" 2>/dev/null || true
                 
                 # 使用统一的证书和 Nginx 配置函数
                 setup_cert_and_nginx "vless-xhttp"
@@ -24871,6 +25034,17 @@ case "${1:-}" in
         install_expire_check_cron
         exit 0
         ;;
+    --repair-reality-link)
+        # 重写 vless.join / vless.link，修复安装时取错公钥导致的节点连不上
+        # 加 --dry-run 只打印参数不落盘
+        repair_reality_link "${2:-}"
+        exit $?
+        ;;
+    --check-reality-keys)
+        # 校验 config.json 里的 Reality 私钥与 join 文件里的公钥是否配对
+        check_reality_keys
+        exit $?
+        ;;
     --help|-h)
         echo "用法: $0 [选项]"
         echo ""
@@ -24879,6 +25053,9 @@ case "${1:-}" in
         echo "  --show-traffic       显示实时流量统计"
         echo "  --check-expire       检查并禁用过期用户 (用于定时任务)"
         echo "  --setup-expire-cron  安装过期检查定时任务"
+        echo "  --repair-reality-link [--dry-run]"
+        echo "                       用当前服务端私钥重写 Reality 节点文件与分享链接"
+        echo "  --check-reality-keys 校验 Reality 私钥与节点公钥是否配对"
         echo "  --help, -h           显示帮助信息"
         echo ""
         echo "无参数时启动交互式菜单"
