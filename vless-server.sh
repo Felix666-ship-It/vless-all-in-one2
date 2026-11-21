@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/Felix666-ship-It/vless-all-in-one2
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.4.14"
+readonly VERSION="3.4.15"
 readonly AUTHOR="Felix666-ship-It"
 readonly REPO_URL="https://github.com/Felix666-ship-It/vless-all-in-one2"
 readonly SCRIPT_REPO="Felix666-ship-It/vless-all-in-one2"
@@ -5140,11 +5140,41 @@ gen_sid() {
     fi
 }
 
+# 从 xray x25519 输出里取出私钥或公钥
+# 用法: _x25519_field private|public   （从 stdin 读）
+#
+# 已知输出格式（Xray 各版本）:
+#   Private key: <43/44 字符>
+#   PrivateKey:  <43/44 字符>
+#   Public key:  <43/44 字符>
+#   PublicKey:   <43/44 字符>
+#   Password:    <43/44 字符>                      ← 部分 26.x
+#   Password (PublicKey): <43/44 字符>             ← 26.11+，标签里带括号
+#
+# 解析策略: 取行尾那段 base64url 值，按标签关键字归类。
+# 不用 sed 固定标签，是因为新版本会在标签后追加括号说明，固定匹配会全部失效。
+_x25519_field() {
+    local want="$1"
+    [[ -z "$want" ]] && return 1
+    awk -v want="$want" '
+    {
+        line = $0
+        # 找最后一个「冒号 + 可选空白 + base64url 值」的位置
+        p = match(line, /:[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*$/)
+        if (p == 0) next
+        val = substr(line, p + 1)
+        gsub(/[[:space:]]/, "", val)
+        # 值长度必须是 43 或 44（x25519 base64url 无填充/有填充）
+        if (length(val) != 43 && length(val) != 44) next
+        label = tolower(substr(line, 1, p - 1))
+        is_priv = (label ~ /private/)
+        is_pub  = (label ~ /public/ || label ~ /password/)
+        if (want == "private" && is_priv) { print val; exit }
+        if (want == "public"  && is_pub && !is_priv) { print val; exit }
+    }'
+}
+
 # 生成 Reality 密钥对 (x25519)
-# 兼容 Xray-core 全部已知输出格式:
-#   旧: "Private key: <b64url>" / "Public key:  <b64url>"
-#   26.x: "PrivateKey: <b64url>" / "PublicKey:  <b64url>"
-#   26.x 变体: "Private key: ..." / "Password:   <b64url>"
 # 私钥和公钥必须来自同一次调用，绝不能拼接不同次输出。
 # 输出: "<私钥> <公钥>"，失败时返回 1 —— 不允许静默返回错值。
 reality_keypair() {
@@ -5154,10 +5184,8 @@ reality_keypair() {
     out=$(xray x25519 2>/dev/null) || { _err "xray x25519 执行失败"; return 1; }
     [[ -z "$out" ]] && { _err "xray x25519 无输出"; return 1; }
 
-    # 私钥: Private key / PrivateKey / Private_key，冒号或等号分隔均可
-    priv=$(printf '%s\n' "$out" | sed -nE 's/^[[:space:]]*[Pp]rivate[ _]?[Kk]ey[[:space:]]*[:=][[:space:]]*([A-Za-z0-9_-]{43,44})[[:space:]]*$/\1/p' | head -1)
-    # 公钥: Public key / PublicKey；26.x 部分版本把它标成 Password
-    pub=$(printf '%s\n' "$out" | sed -nE 's/^[[:space:]]*([Pp]ublic[ _]?[Kk]ey|[Pp]assword)[[:space:]]*[:=][[:space:]]*([A-Za-z0-9_-]{43,44})[[:space:]]*$/\2/p' | head -1)
+    priv=$(printf '%s\n' "$out" | _x25519_field private)
+    pub=$(printf '%s\n' "$out" | _x25519_field public)
 
     # 丢字段 = 硬失败，不再让空值流到 join 文件和客户端配置里
     [[ -z "$priv" ]] && { _err "无法从 xray x25519 输出中解析私钥，原始输出:"; printf '%s\n' "$out" | sed 's/^/    /' >&2; return 1; }
@@ -5165,7 +5193,7 @@ reality_keypair() {
 
     # 自洽校验: 用私钥反推公钥必须与本次输出一致
     local derived
-    derived=$(xray x25519 -i "$priv" 2>/dev/null | sed -nE 's/^[[:space:]]*([Pp]ublic[ _]?[Kk]ey|[Pp]assword)[[:space:]]*[:=][[:space:]]*([A-Za-z0-9_-]{43,44})[[:space:]]*$/\2/p' | head -1)
+    derived=$(xray x25519 -i "$priv" 2>/dev/null | _x25519_field public)
     if [[ -n "$derived" && "$derived" != "$pub" ]]; then
         _err "Reality 密钥自检失败: 私钥推导出的公钥与 x25519 输出不一致"
         _err "  输出公钥: $pub"
@@ -5190,7 +5218,7 @@ verify_reality_keypair() {
     priv=$(jq -r '[.inbounds[]? | select(.streamSettings.security == "reality") | .streamSettings.realitySettings.privateKey][0] // empty' "$CFG/config.json" 2>/dev/null)
     [[ -z "$priv" ]] && return 1
 
-    derived=$(xray x25519 -i "$priv" 2>/dev/null | sed -nE 's/^[[:space:]]*([Pp]ublic[ _]?[Kk]ey|[Pp]assword)[[:space:]]*[:=][[:space:]]*([A-Za-z0-9_-]{43,44})[[:space:]]*$/\2/p' | head -1)
+    derived=$(xray x25519 -i "$priv" 2>/dev/null | _x25519_field public)
     [[ -z "$derived" ]] && return 1
 
     [[ "$derived" == "$expect_pub" ]]
@@ -5208,7 +5236,7 @@ check_reality_keys() {
     # 1. 每个 inbound: 私钥必须能被 xray 接受
     while IFS= read -r priv; do
         [[ -z "$priv" || "$priv" == "null" ]] && continue
-        derived=$(xray x25519 -i "$priv" 2>/dev/null | sed -nE 's/^[[:space:]]*([Pp]ublic[ _]?[Kk]ey|[Pp]assword)[[:space:]]*[:=][[:space:]]*([A-Za-z0-9_-]{43,44})[[:space:]]*$/\2/p' | head -1)
+        derived=$(xray x25519 -i "$priv" 2>/dev/null | _x25519_field public)
         if [[ -z "$derived" ]]; then
             _err "Reality 私钥无法推导公钥（已损坏）: ${priv:0:8}..."
             bad=1
@@ -5222,7 +5250,7 @@ check_reality_keys() {
         join_pub=$(sed -nE 's/^REALITY\|%s\|[^|]*\|[^|]*\|([A-Za-z0-9_-]{43,44})\|.*$/\1/p' "$CFG/vless.join" | head -1)
         cfg_pub=$(jq -r '[.inbounds[]? | select(.streamSettings.security == "reality") | .streamSettings.realitySettings.privateKey][0] // empty' "$CFG/config.json" 2>/dev/null)
         if [[ -n "$join_pub" && -n "$cfg_pub" ]]; then
-            derived=$(xray x25519 -i "$cfg_pub" 2>/dev/null | sed -nE 's/^[[:space:]]*([Pp]ublic[ _]?[Kk]ey|[Pp]assword)[[:space:]]*[:=][[:space:]]*([A-Za-z0-9_-]{43,44})[[:space:]]*$/\2/p' | head -1)
+            derived=$(xray x25519 -i "$cfg_pub" 2>/dev/null | _x25519_field public)
             if [[ -n "$derived" && "$derived" != "$join_pub" ]]; then
                 _err "客户端节点公钥与服务端私钥不配对！"
                 _err "  vless.join 公钥 : $join_pub"
@@ -5249,7 +5277,7 @@ repair_reality_link() {
     priv=$(jq -r '[.inbounds[]? | select(.streamSettings.security == "reality") | .streamSettings.realitySettings.privateKey][0] // empty' "$CFG/config.json")
     [[ -z "$priv" ]] && { _err "config.json 中没有 Reality inbound"; return 1; }
 
-    pub=$(xray x25519 -i "$priv" 2>/dev/null | sed -nE 's/^[[:space:]]*([Pp]ublic[ _]?[Kk]ey|[Pp]assword)[[:space:]]*[:=][[:space:]]*([A-Za-z0-9_-]{43,44})[[:space:]]*$/\2/p' | head -1)
+    pub=$(xray x25519 -i "$priv" 2>/dev/null | _x25519_field public)
     [[ -z "$pub" ]] && { _err "无法从私钥推导公钥，私钥本身可能已损坏"; return 1; }
 
     # 优先取 DB 里的首个 Reality inbound 参数
