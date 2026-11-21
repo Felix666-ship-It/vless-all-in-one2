@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/Felix666-ship-It/vless-all-in-one2
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.4.17"
+readonly VERSION="3.4.18"
 readonly AUTHOR="Felix666-ship-It"
 readonly REPO_URL="https://github.com/Felix666-ship-It/vless-all-in-one2"
 readonly SCRIPT_REPO="Felix666-ship-It/vless-all-in-one2"
@@ -6914,6 +6914,9 @@ setup_cert_and_nginx() {
     # 全局变量，供调用方使用
     CERT_DOMAIN=""
     NGINX_PORT="$default_nginx_port"
+    # 每次进入都必须清空，否则上一次安装残留的"真实域名"会覆盖本次用户选择
+    # （ask_sni_config 在 $(...) 子 shell 里 unset，对父进程无效）
+    REALITY_SNI_CONFIRMED=""
     
     # === 回落子协议检测：如果是 WS 协议且主协议在 8443 端口，跳过 Nginx 配置 ===
     local is_fallback_mode=false
@@ -6984,6 +6987,7 @@ setup_cert_and_nginx() {
                     if [[ "$reality_cert_choice" == "2" ]]; then
                         # 用户选择无域名模式，清除证书域名变量和旧证书
                         CERT_DOMAIN=""
+                        REALITY_SNI_CONFIRMED=""
                         rm -f "$CFG/certs/server.crt" "$CFG/certs/server.key" "$CFG/cert_domain"
                         _info "将使用随机 SNI (无域名模式)"
                         return 0
@@ -7178,10 +7182,13 @@ ask_sni_config() {
     local cert_domain="${2:-}"
     
     # 如果 Reality 协议已在 setup_cert_and_nginx 中确定使用真实域名，直接返回
+    # 注意：本函数通常以 $(ask_sni_config ...) 形式调用，运行在子 shell 中，
+    # 这里的 unset 不会影响父进程，所以父进程侧必须在 setup_cert_and_nginx
+    # 入口处把 REALITY_SNI_CONFIRMED 清空，避免上一次安装的残留覆盖本次选择。
     if [[ -n "$REALITY_SNI_CONFIRMED" ]]; then
-        _ok "使用真实域名: $REALITY_SNI_CONFIRMED" >&2
+        _ok "沿用向导中的真实域名: $REALITY_SNI_CONFIRMED" >&2
         echo "$REALITY_SNI_CONFIRMED"
-        unset REALITY_SNI_CONFIRMED  # 清除标记
+        unset REALITY_SNI_CONFIRMED
         return 0
     fi
     
@@ -18963,6 +18970,8 @@ do_install_server() {
             
             # 询问SNI配置
             local final_sni=$(ask_sni_config "$(gen_sni)" "$cert_domain")
+            # ask_sni_config 在子 shell 中执行，父进程需自行清理标记，防止串到下一次安装
+            REALITY_SNI_CONFIRMED=""
             
             # 如果没有真实域名，用选择的 SNI 重新生成自签证书
             if [[ -z "$cert_domain" ]]; then
@@ -19031,6 +19040,8 @@ do_install_server() {
                 
                 # 询问SNI配置
                 local final_sni=$(ask_sni_config "$(gen_sni)" "$cert_domain")
+            # ask_sni_config 在子 shell 中执行，父进程需自行清理标记，防止串到下一次安装
+            REALITY_SNI_CONFIRMED=""
 
                 # Reality dest 体检
                 if ! _reality_dest_warn "$final_sni" 443; then
@@ -19379,6 +19390,8 @@ do_install_server() {
             
             # 询问SNI配置
             local final_sni=$(ask_sni_config "$(gen_sni)" "$cert_domain")
+            # ask_sni_config 在子 shell 中执行，父进程需自行清理标记，防止串到下一次安装
+            REALITY_SNI_CONFIRMED=""
             
             echo ""
             _line
@@ -19623,6 +19636,8 @@ do_install_server() {
             
             # 询问SNI配置（在证书申请完成后）
             local final_sni=$(ask_sni_config "$(gen_sni)" "$cert_domain")
+            # ask_sni_config 在子 shell 中执行，父进程需自行清理标记，防止串到下一次安装
+            REALITY_SNI_CONFIRMED=""
             
             # ===== 新增：端口跳跃开关 + 范围（默认不启用）=====
             local hop_enable=0
@@ -19708,6 +19723,8 @@ do_install_server() {
             
             # 询问SNI配置
             local final_sni=$(ask_sni_config "$(gen_sni)" "$cert_domain")
+            # ask_sni_config 在子 shell 中执行，父进程需自行清理标记，防止串到下一次安装
+            REALITY_SNI_CONFIRMED=""
             
             # WS 模式询问 path
             if [[ "$use_ws" == "true" ]]; then
