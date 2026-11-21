@@ -1,6 +1,6 @@
 #!/bin/bash 
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.4.11 [服务端]
+#  多协议代理一键部署脚本 v3.4.19 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/Felix666-ship-It/vless-all-in-one2
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.4.18"
+readonly VERSION="3.4.19"
 readonly AUTHOR="Felix666-ship-It"
 readonly REPO_URL="https://github.com/Felix666-ship-It/vless-all-in-one2"
 readonly SCRIPT_REPO="Felix666-ship-It/vless-all-in-one2"
@@ -5869,6 +5869,159 @@ _dns_records() {
     fi
 }
 
+# 选取一个当前未被监听的本地端口（供一次性 REALITY 探测使用）
+_pick_free_port() {
+    local p i
+    for ((i=0; i<60; i++)); do
+        p=$(( 20000 + RANDOM % 40000 ))
+        if command -v ss &>/dev/null; then
+            ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$" && continue
+        else
+            (exec 3<>"/dev/tcp/127.0.0.1/${p}") 2>/dev/null && continue
+        fi
+        printf '%s\n' "$p"
+        return 0
+    done
+    return 1
+}
+
+# 在 COMMON_SNI_LIST 与固定兜底列表里找出一个能完成 REALITY 握手的 SNI
+# 用法: sni=$(_pick_working_sni)
+_pick_working_sni() {
+    local i sni
+    for ((i=0; i<3; i++)); do
+        sni=$(gen_sni)
+        if _reality_dest_check "$sni" 443 2>/dev/null; then
+            printf '%s\n' "$sni"
+            return 0
+        fi
+    done
+    for sni in www.cloudflare.com www.apple.com support.apple.com www.bing.com; do
+        if _reality_dest_check "$sni" 443 2>/dev/null; then
+            printf '%s\n' "$sni"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# REALITY 端到端探测：在本机拉起一次性 Reality 服务端 + 客户端，
+# 用候选 dest 建立真实隧道并回读本地 HTTP 响应。
+# 直连 TLS1.3 能通不代表 REALITY 能通（CDN/Akamai 站点常见），
+# 只有这里跑通才说明该 dest 可作为 Reality 目标。
+# 用法: _reality_probe_ok <host> [port]
+_reality_probe_ok() {
+    local sni="${1:-}" port="${2:-443}"
+    [[ -z "$sni" ]] && return 1
+
+    local xbin curlbin
+    xbin=$(command -v xray 2>/dev/null || true)
+    curlbin=$(command -v curl 2>/dev/null || true)
+    # 缺少探测依赖时不做阻断，交给安装后的实际使用判断
+    [[ -z "$xbin" || -z "$curlbin" ]] && return 0
+
+    local tmpdir sp cp tp kp priv pub sid uuid
+    tmpdir=$(mktemp -d 2>/dev/null) || return 0
+    sp=$(_pick_free_port) || { rm -rf "$tmpdir"; return 0; }
+    cp=$(_pick_free_port) || { rm -rf "$tmpdir"; return 0; }
+    while [[ "$cp" == "$sp" ]]; do
+        cp=$(_pick_free_port) || { rm -rf "$tmpdir"; return 0; }
+    done
+    tp=$(_pick_free_port) || { rm -rf "$tmpdir"; return 0; }
+    while [[ "$tp" == "$sp" || "$tp" == "$cp" ]]; do
+        tp=$(_pick_free_port) || { rm -rf "$tmpdir"; return 0; }
+    done
+
+    kp=$("$xbin" x25519 2>/dev/null) || { rm -rf "$tmpdir"; return 0; }
+    priv=$(printf '%s\n' "$kp" | _x25519_field private)
+    pub=$(printf '%s\n' "$kp" | _x25519_field public)
+    if [[ -z "$priv" || -z "$pub" ]]; then
+        rm -rf "$tmpdir"
+        return 0
+    fi
+    sid=$(gen_sid)
+    uuid=$(gen_uuid)
+
+    cat > "$tmpdir/srv.json" <<PROBE_EOF
+{
+  "log": {"loglevel": "warning", "error": "$tmpdir/srv.log"},
+  "inbounds": [{
+    "port": $sp, "listen": "127.0.0.1", "protocol": "vless",
+    "settings": {
+      "clients": [{"id": "$uuid", "flow": "xtls-rprx-vision"}],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "tcp", "security": "reality",
+      "realitySettings": {
+        "show": false, "dest": "$sni:$port", "xver": 0,
+        "serverNames": ["$sni"],
+        "privateKey": "$priv",
+        "shortIds": ["$sid"]
+      }
+    }
+  }],
+  "outbounds": [{"protocol": "freedom"}]
+}
+PROBE_EOF
+
+    cat > "$tmpdir/cli.json" <<PROBE_EOF
+{
+  "log": {"loglevel": "warning", "error": "$tmpdir/cli.log"},
+  "inbounds": [{"listen": "127.0.0.1", "port": $cp, "protocol": "socks"}],
+  "outbounds": [{
+    "protocol": "vless",
+    "settings": {"vnext": [{
+      "address": "127.0.0.1", "port": $sp,
+      "users": [{"id": "$uuid", "encryption": "none", "flow": "xtls-rprx-vision"}]
+    }]},
+    "streamSettings": {
+      "network": "tcp", "security": "reality",
+      "realitySettings": {
+        "serverName": "$sni", "fingerprint": "chrome",
+        "publicKey": "$pub", "shortId": "$sid"
+      }
+    }
+  }]
+}
+PROBE_EOF
+
+    local target code="" http_pid="" srv_pid="" cli_pid=""
+    if command -v python3 &>/dev/null; then
+        echo "probe-ok" > "$tmpdir/index.html"
+        python3 -m http.server "$tp" --bind 127.0.0.1 --directory "$tmpdir" >/dev/null 2>&1 &
+        http_pid=$!
+        target="http://127.0.0.1:${tp}/"
+    else
+        target="https://cp.cloudflare.com/generate_204"
+    fi
+
+    "$xbin" run -c "$tmpdir/srv.json" >/dev/null 2>&1 &
+    srv_pid=$!
+    "$xbin" run -c "$tmpdir/cli.json" >/dev/null 2>&1 &
+    cli_pid=$!
+
+    # 给一次性实例 1 秒启动时间；最多探测 3 次，单次 4 秒超时
+    sleep 1
+    local i
+    for ((i=0; i<3; i++)); do
+        code=$("$curlbin" -s -o /dev/null -m 4 -w '%{http_code}' \
+            --socks5-hostname "127.0.0.1:${cp}" "$target" 2>/dev/null)
+        [[ "$code" == "200" || "$code" == "204" ]] && break
+        sleep 0.3
+    done
+
+    [[ -n "$cli_pid" ]] && kill "$cli_pid" 2>/dev/null
+    [[ -n "$srv_pid" ]] && kill "$srv_pid" 2>/dev/null
+    [[ -n "$http_pid" ]] && kill "$http_pid" 2>/dev/null
+    [[ -n "$cli_pid" ]] && wait "$cli_pid" 2>/dev/null
+    [[ -n "$srv_pid" ]] && wait "$srv_pid" 2>/dev/null
+    [[ -n "$http_pid" ]] && wait "$http_pid" 2>/dev/null
+    rm -rf "$tmpdir"
+
+    [[ "$code" == "200" || "$code" == "204" ]]
+}
+
 # 校验 Reality 的 dest 是否可用
 # Reality 服务端必须能把 ClientHello 转发给 dest 并拿回真实 TLS 握手；
 # dest 若不是可用的 TLS1.3 站点，握手会直接失败（表现为客户端 ECONNRESET / 超时）。
@@ -5897,13 +6050,11 @@ _reality_dest_check() {
         fi
     fi
 
-    # 3. 必须能完成 TLS1.3 握手
-    command -v openssl &>/dev/null || return 0   # 无 openssl 时不阻塞安装
-    local out
-    out=$(echo | timeout 8 openssl s_client -connect "${host}:${port}" \
-        -servername "$host" -tls1_3 -alpn h2 2>/dev/null)
-    [[ "$out" == *"TLSv1.3"* ]] || return 1
-    [[ "$out" == *"BEGIN CERTIFICATE"* ]] || return 1
+    # 3. 必须能完成一次真实的 REALITY 握手。
+    #    直连 TLS1.3 + H2 只能说明站点活着；部分 CDN/Akamai 站点
+    #    （如 www.microsoft.com）直连正常，但 REALITY 中继/握手必然失败，
+    #    装完表现为节点连不上。这里直接跑端到端探测。
+    _reality_probe_ok "$host" "$port" || return 1
     return 0
 }
 
@@ -5937,7 +6088,7 @@ _reality_dest_warn() {
 
     if [[ -z "$a4" && -z "$a6" ]]; then
         _err "SNI 域名无法解析，Reality 握手必然失败" >&2
-        _warn "请换一个真实站点，例如 support.apple.com / www.apple.com / www.microsoft.com" >&2
+        _warn "请换一个真实站点，例如 support.apple.com / www.apple.com / www.cloudflare.com" >&2
         return 1
     fi
 
@@ -5950,7 +6101,7 @@ _reality_dest_warn() {
     if ! _reality_dest_check "$sni" "$port"; then
         _err "dest 无法完成 TLS1.3 握手，Reality 将连不上" >&2
         _warn "这个域名不像真实站点，请改用真实站点作 SNI" >&2
-        _warn "推荐: support.apple.com  www.apple.com  www.microsoft.com  www.cloudflare.com" >&2
+        _warn "推荐: support.apple.com  www.apple.com  www.cloudflare.com  www.bing.com" >&2
         return 1
     fi
 
@@ -7231,7 +7382,16 @@ ask_sni_config() {
             fi
             
             if [[ "$sni_choice" == "1" ]]; then
-                echo "$random_sni"
+                local chosen_sni="$random_sni"
+                if ! _reality_dest_check "$chosen_sni" 443 2>/dev/null; then
+                    _warn "SNI $chosen_sni 无法完成 REALITY 握手，自动切换可用 SNI" >&2
+                    chosen_sni=$(_pick_working_sni 2>/dev/null)
+                fi
+                if [[ -z "$chosen_sni" ]]; then
+                    _err "未找到可用的 REALITY SNI，请选择自定义并输入真实站点" >&2
+                    continue
+                fi
+                echo "$chosen_sni"
                 return 0
             elif [[ "$sni_choice" == "2" ]]; then
                 break
@@ -7255,7 +7415,16 @@ ask_sni_config() {
             fi
             
             if [[ "$sni_choice" == "1" ]]; then
-                echo "$default_sni"
+                local chosen_sni="$default_sni"
+                if ! _reality_dest_check "$chosen_sni" 443 2>/dev/null; then
+                    _warn "SNI $chosen_sni 无法完成 REALITY 握手，自动切换可用 SNI" >&2
+                    chosen_sni=$(_pick_working_sni 2>/dev/null)
+                fi
+                if [[ -z "$chosen_sni" ]]; then
+                    _err "未找到可用的 REALITY SNI，请选择自定义并输入真实站点" >&2
+                    continue
+                fi
+                echo "$chosen_sni"
                 return 0
             elif [[ "$sni_choice" == "2" ]]; then
                 break
@@ -7281,8 +7450,13 @@ ask_sni_config() {
         else
             # 基本域名格式验证
             if [[ "$custom_sni" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
-                echo "$custom_sni"
-                return 0
+                # 语法合法还不够：必须能完成真实 REALITY 握手，否则装完必连不上
+                if _reality_dest_check "$custom_sni" 443 2>/dev/null; then
+                    echo "$custom_sni"
+                    return 0
+                fi
+                _err "SNI $custom_sni 无法完成 REALITY 握手（握手失败），未采用" >&2
+                _warn "请换一个真实站点，例如 www.cloudflare.com / www.apple.com / support.apple.com" >&2
             else
                 _err "无效SNI格式: $custom_sni" >&2
                 _warn "SNI格式示例: www.example.com" >&2
